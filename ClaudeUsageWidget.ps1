@@ -275,7 +275,7 @@ function Set-DemoData {
     captions = [pscustomobject]$DefaultCaptions
     accounts = @(
       [pscustomobject]@{ name = 'personal'; label = 'Personal'; plan = 'Max 20x'; source = 'claude-code'; taskbar = $true; limits = @('5h', '7d', 'fable') }
-      [pscustomobject]@{ name = 'work'; label = 'Work'; plan = 'Max 5x'; source = 'xndr-claude'; taskbar = $true; limits = @('5h', '7d') }
+      [pscustomobject]@{ name = 'work'; label = 'Work'; plan = 'Max 5x'; source = 'xndr-claude'; taskbar = $true; style = 'combined'; pie = '5h' }
       [pscustomobject]@{ name = 'side'; label = 'Side project'; plan = 'Pro'; source = 'env' }
     )
   }
@@ -385,6 +385,50 @@ function New-RingElement($pct, [string]$caption, [bool]$gapAfter) {
   return $el
 }
 
+# Filled wedge from 12 o'clock, clockwise.
+function Set-Pie($path, $pct, [double]$c = 15, [double]$r = 8.5) {
+  $path.Fill = Get-UsageColor $pct
+  if ($null -eq $pct -or $pct -le 0) { $path.Data = $null; return }
+  if ($pct -ge 100) { $path.Data = New-Object Windows.Media.EllipseGeometry((New-Object Windows.Point($c, $c)), $r, $r); return }
+  $f = [double]$pct / 100; $a = 2 * [Math]::PI * $f
+  $fig = New-Object Windows.Media.PathFigure
+  $fig.StartPoint = New-Object Windows.Point($c, $c)
+  $fig.IsClosed = $true
+  $fig.Segments.Add((New-Object Windows.Media.LineSegment((New-Object Windows.Point($c, ($c - $r))), $true)))
+  $end = New-Object Windows.Point(($c + $r * [Math]::Sin($a)), ($c - $r * [Math]::Cos($a)))
+  $fig.Segments.Add((New-Object Windows.Media.ArcSegment($end, (New-Object Windows.Size($r, $r)), 0, ($f -gt 0.5), ([Windows.Media.SweepDirection]::Clockwise), $true)))
+  $geo = New-Object Windows.Media.PathGeometry
+  $geo.Figures.Add($fig)
+  $path.Data = $geo
+}
+
+# One dial for two limits: a pie in the middle, a ring around it, and both percentages beside it
+# (a filled dot marks the pie, a hollow one the ring).
+function New-CombinedElement($cfg, $res) {
+  $pieKey = if ($cfg.pie -eq '7d') { '7d' } else { '5h' }
+  $lines = foreach ($k in '5h', '7d') {
+    $w = Get-Win $res $k
+    $pct = if ($null -ne $w.pct) { "$(Format-Pct $w.pct)%" } elseif ($script:job) { $ELL } else { $DASH }
+    $mark = if ($k -eq $pieKey) { [char]0x25CF } else { [char]0x25CB }
+    "<TextBlock FontSize=`"10`"><Run Text=`"$mark `" Foreground=`"$(Get-UsageColor $w.pct)`"/><Run Text=`"$pct`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`"/><Run Text=`" $(Esc (Get-Caption $k))`" Foreground=`"$($Theme.sub)`"/></TextBlock>"
+  }
+  $el = [Windows.Markup.XamlReader]::Parse(@"
+<StackPanel $ns Orientation="Horizontal">
+  <Grid Width="30" Height="30">
+    <Ellipse Stroke="$($Theme.ring)" StrokeThickness="3.5"/>
+    <Path Name="Arc" StrokeThickness="3.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+    <Ellipse Width="17" Height="17" Fill="$($Theme.ring)"/>
+    <Path Name="Pie"/>
+  </Grid>
+  <StackPanel VerticalAlignment="Center" Margin="6,0,0,0">$($lines -join '')</StackPanel>
+</StackPanel>
+"@)
+  $ringKey = if ($pieKey -eq '5h') { '7d' } else { '5h' }
+  Set-Ring ($el.FindName('Arc')) (Get-Win $res $ringKey).pct
+  Set-Pie ($el.FindName('Pie')) (Get-Win $res $pieKey).pct
+  return $el
+}
+
 function Get-AccountTip($cfg, $res) {
   $tip = @()
   if ($cfg) {
@@ -425,10 +469,14 @@ function Update-Widget {
         TextTrimming = 'CharacterEllipsis'; VerticalAlignment = 'Center'; Margin = '0,0,8,0'
       }))
     }
-    $keys = @(Get-TaskbarLimits $cfg)
-    for ($k = 0; $k -lt $keys.Count; $k++) {
-      $w = Get-Win $res $keys[$k]
-      [void]$g.Children.Add((New-RingElement $w.pct (Get-Caption $keys[$k]) ($k -lt $keys.Count - 1)))
+    if ($cfg.style -eq 'combined') {
+      [void]$g.Children.Add((New-CombinedElement $cfg $res))
+    } else {
+      $keys = @(Get-TaskbarLimits $cfg)
+      for ($k = 0; $k -lt $keys.Count; $k++) {
+        $w = Get-Win $res $keys[$k]
+        [void]$g.Children.Add((New-RingElement $w.pct (Get-Caption $keys[$k]) ($k -lt $keys.Count - 1)))
+      }
     }
     $g.ToolTip = Get-AccountTip $cfg $res
     [void]$WidgetEls.Groups.Children.Add($g)
@@ -466,6 +514,29 @@ function Set-WidgetPosition {
   <Border x:Name="Card" Background="$($Theme.card)" BorderBrush="$($Theme.border)" BorderThickness="1" CornerRadius="10" Padding="8" Margin="8">
     <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="3" Opacity="0.35"/></Border.Effect>
     <Border.Resources>
+      <Style x:Key="Seg" TargetType="RadioButton">
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Foreground" Value="$($Theme.fg)"/>
+        <Setter Property="FontSize" Value="11.5"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="RadioButton">
+              <Border x:Name="Bd" Background="$($Theme.field)" BorderBrush="$($Theme.border)" BorderThickness="1" CornerRadius="5" Padding="10,2" Margin="0,0,4,0">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="BorderBrush" Value="$($Theme.sub)"/></Trigger>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="Bd" Property="Background" Value="$($Colors.accent)"/>
+                  <Setter TargetName="Bd" Property="BorderBrush" Value="$($Colors.accent)"/>
+                  <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
       <Style x:Key="IconBtn" TargetType="Button">
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="Focusable" Value="False"/>
@@ -595,6 +666,9 @@ function New-AccountRow($cfg, $shownNames) {
   $plan = Esc $(if ($cfg.plan) { "   $($cfg.plan)" } else { '' })
   if ($script:editing) {
     $limits = @(Get-TaskbarLimits $cfg)
+    $combined = $cfg.style -eq 'combined'
+    $pie = if ($cfg.pie -eq '7d') { '7d' } else { '5h' }
+    $id = [regex]::Replace("$($cfg.name)", '[^A-Za-z0-9_]', '_')
     $ringBoxes = ($LimitKeys | ForEach-Object {
       "<CheckBox Name=`"L_$_`" Content=`"$(Esc (Get-Caption $_))`" Margin=`"0,0,14,0`" IsChecked=`"$(if ($limits -contains $_) { 'True' } else { 'False' })`"/>"
     }) -join ''
@@ -606,12 +680,24 @@ function New-AccountRow($cfg, $shownNames) {
       <TextBlock DockPanel.Dock="Right" Text="$plan" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="6,0,0,0"/>
       <TextBox Name="Label" Text="$label" ToolTip="Account name"/>
     </DockPanel>
-    <WrapPanel Margin="26,9,0,0">
-      <TextBlock Text="Rings" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="0,0,10,0"/>
+    <DockPanel Margin="26,9,0,0">
+      <CheckBox Name="Vis" DockPanel.Dock="Right" Content="In list" ToolTip="Untick to hide this account (e.g. a duplicate)"/>
+      <StackPanel Orientation="Horizontal">
+        <TextBlock Text="Style" Width="48" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
+        <RadioButton Name="S_rings" Style="{DynamicResource Seg}" GroupName="style_$id" Content="Rings" IsChecked="$(-not $combined)"/>
+        <RadioButton Name="S_combined" Style="{DynamicResource Seg}" GroupName="style_$id" Content="Combined" IsChecked="$combined"/>
+      </StackPanel>
+    </DockPanel>
+    <WrapPanel Name="RingsPanel" Margin="26,8,0,0" Visibility="$(if ($combined) { 'Collapsed' } else { 'Visible' })">
+      <TextBlock Text="Rings" Width="48" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
       $ringBoxes
-      <Border Width="1" Height="14" Background="$($Theme.border)" Margin="0,0,14,0" VerticalAlignment="Center"/>
-      <CheckBox Name="Vis" Content="In list" ToolTip="Untick to hide this account (e.g. a duplicate)"/>
     </WrapPanel>
+    <StackPanel Name="PiePanel" Orientation="Horizontal" Margin="26,8,0,0" Visibility="$(if ($combined) { 'Visible' } else { 'Collapsed' })">
+      <TextBlock Text="Middle" Width="48" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
+      <RadioButton Name="P_5h" Style="{DynamicResource Seg}" GroupName="pie_$id" Content="$(Esc (Get-Caption '5h'))" IsChecked="$($pie -eq '5h')"/>
+      <RadioButton Name="P_7d" Style="{DynamicResource Seg}" GroupName="pie_$id" Content="$(Esc (Get-Caption '7d'))" IsChecked="$($pie -eq '7d')"/>
+      <TextBlock Text="pie in the middle, the other on the ring" FontSize="10.5" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="6,0,0,0"/>
+    </StackPanel>
   </StackPanel>
 </Border>
 "@)
@@ -622,6 +708,23 @@ function New-AccountRow($cfg, $shownNames) {
       $cb = $row.FindName("L_$k")
       $cb.Tag = "$($cfg.name)|$k"
       $cb.Add_Click({ param($s) $n, $key = $s.Tag -split '\|', 2; Set-Limit $n $key ([bool]$s.IsChecked) $s })
+    }
+    foreach ($opt in 'rings', 'combined') {
+      $rb = $row.FindName("S_$opt")
+      $rb.Tag = @{ name = $cfg.name; value = $opt; row = $row }
+      $rb.Add_Checked({
+        param($s)
+        Set-AcctProp $s.Tag.name 'style' $s.Tag.value
+        $c = $s.Tag.value -eq 'combined'
+        $s.Tag.row.FindName('RingsPanel').Visibility = if ($c) { 'Collapsed' } else { 'Visible' }
+        $s.Tag.row.FindName('PiePanel').Visibility = if ($c) { 'Visible' } else { 'Collapsed' }
+        Save-UiConfig; Update-Widget
+      })
+    }
+    foreach ($opt in '5h', '7d') {
+      $rb = $row.FindName("P_$opt")
+      $rb.Tag = @{ name = $cfg.name; value = $opt }
+      $rb.Add_Checked({ param($s) Set-AcctProp $s.Tag.name 'pie' $s.Tag.value; Save-UiConfig; Update-Widget })
     }
     $vis = $row.FindName('Vis')
     $vis.IsChecked = $cfg.hidden -ne $true
@@ -702,7 +805,7 @@ function Update-Popup {
     $script:loadingCaptions = $false
   }
   $PopupEls.Footer.Text = if ($script:editing) {
-    "Tick an account to show it on the taskbar. Rings picks which limits it shows there. The list always shows every limit."
+    "Tick an account to show it on the taskbar. Rings shows one ring per limit; Combined shows 5h and 7d in one dial. The list always shows every limit."
   } else {
     "Tick accounts to show them on the taskbar $DOT Ctrl+drag the rings to move them"
   }

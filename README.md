@@ -22,7 +22,8 @@ One account or several, updated in the background, in one click.
 - **Multiple accounts.** Tick the accounts you want on the taskbar and they sit side by side, each with its name.
 - **All limits in one click.** The list shows each account's 5-hour window, 7-day window and Fable weekly limit, with countdowns to the resets.
 - **Finds your accounts.** On first run it picks up the Claude Code logins on your PC (and [xndr-claude](https://github.com/mrcsXndr/xndr-claude) accounts if you use it).
-- **Settings you can edit.** Rename accounts, choose which rings each one shows, and rename the ring captions.
+- **Two styles.** **Rings** gives each limit its own ring. **Combined** puts one limit as a pie in the middle and the other as the ring around it, with both percentages beside it. You choose which limit goes in the middle.
+- **Settings you can edit.** Rename accounts, choose each account's style and rings, and rename the ring captions.
 - **Stays out of the way.** Refreshes every 30 minutes, and at most once a minute however you trigger it. Catches up after sleep. Hides during full-screen apps. Follows the light or dark theme.
 - **Nothing to install besides itself.** It's plain PowerShell and WPF, which ship with Windows, so there are no runtimes, services or admin rights involved.
 
@@ -53,7 +54,7 @@ Running either one again updates you to the latest release and keeps your settin
 | --- | --- |
 | **Click** the rings | Open the account list |
 | **Tick** an account | Show it on the taskbar |
-| **⚙ Settings** | Rename accounts, choose each one's rings, rename captions |
+| **⚙ Settings** | Rename accounts, pick Rings or Combined, choose rings, rename captions |
 | **⟳** | Refresh now (at most once a minute) |
 | **Ctrl + drag** | Move the rings along the taskbar |
 | **Right-click** | Refresh · Settings · Scan for accounts · Start with Windows · Uninstall · Exit |
@@ -82,7 +83,7 @@ Everything is stored in `%APPDATA%\claude-usage-widget\config.json`. To open it,
   "captions": { "5h": "5h", "7d": "7d", "fable": "Fable" },
   "accounts": [
     { "name": "claude-code", "label": "Personal", "source": "claude-code", "taskbar": true, "limits": ["5h", "7d", "fable"] },
-    { "name": "work",  "label": "Work",  "source": "xndr-claude" },
+    { "name": "work",  "label": "Work",  "source": "xndr-claude", "style": "combined", "pie": "5h" },
     { "name": "vault", "label": "Vault", "source": "command", "command": "op read op://Private/claude/token" },
     { "name": "ci",    "label": "CI",    "source": "env", "env": "CLAUDE_CI_TOKEN", "fable": false }
   ]
@@ -96,7 +97,7 @@ Everything is stored in `%APPDATA%\claude-usage-widget\config.json`. To open it,
 | `command` | Whatever the command prints, for example a password manager CLI. |
 | `env` | An environment variable. |
 
-`"fable": false` makes that account skip the Fable probe (see below).
+`"style": "combined"` shows 5h and 7d in one dial, and `"pie"` (`"5h"` or `"7d"`) picks which one goes in the middle. `"limits"` picks the rings in the Rings style. `"fable": false` makes that account skip the Fable probe (see below).
 </details>
 
 ## How it works
