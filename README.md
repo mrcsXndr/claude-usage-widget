@@ -130,7 +130,7 @@ Hover an account in the list to see which method it used.
 ```powershell
 .\ClaudeUsageWidget.ps1 -Demo          # made-up accounts, no network, your config untouched
 .\ClaudeUsageWidget.ps1 -Once          # every account's usage as JSON, no UI (never includes tokens)
-.\ClaudeUsageWidget.ps1 -Snapshot docs # re-render the README screenshots
+.\ClaudeUsageWidget.ps1 -Snapshot out  # render the demo UI to PNGs (docs/settings.png)
 .\tools\Build-Icon.ps1                 # re-render assets\icon.ico
 ```
 
