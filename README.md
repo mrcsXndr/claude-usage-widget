@@ -141,6 +141,7 @@ To keep your settings for a later reinstall, add `-KeepSettings` to that command
 | | |
 | --- | --- |
 | **Rings don't appear** | Run the installer again. Errors are logged to `%APPDATA%\claude-usage-widget\widget.log`. |
+| **Popup acts oddly** | Set the environment variable `CUW_DEBUG=1` and restart the widget. It then logs each open/close decision to `widget.log`. Please attach that log to an [issue](https://github.com/mrcsXndr/claude-usage-widget/issues). |
 | **"Login expired"** | Open Claude Code once so it renews the login. |
 | **"token invalid"** | That token was revoked. Log in again, or make a new setup-token. |
 | **Rings cover a tray icon** | Hold Ctrl and drag them somewhere else. |
@@ -163,6 +164,10 @@ To keep your settings for a later reinstall, add `-KeepSettings` to that command
 | `install.ps1` / `Install.cmd` / `uninstall.ps1` | Per-user install to `%LOCALAPPDATA%\Programs`, with Start menu, startup and Settings → Apps entries |
 
 The code is kept ASCII-only so the Windows PowerShell 5.1 that ships with Windows reads it correctly. Pull requests are welcome.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## License
 

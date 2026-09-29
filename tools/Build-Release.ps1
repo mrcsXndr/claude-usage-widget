@@ -6,6 +6,6 @@ $root = Split-Path $PSScriptRoot
 $out = Join-Path $root 'dist\ClaudeUsageWidget.zip'
 New-Item -ItemType Directory -Force (Split-Path $out) | Out-Null
 git -C $root archive --format=zip -o $out HEAD `
-  ClaudeUsageWidget.ps1 lib uninstall.ps1 install.ps1 Install.cmd assets/icon.ico LICENSE README.md
+  ClaudeUsageWidget.ps1 lib uninstall.ps1 install.ps1 Install.cmd assets/icon.ico LICENSE README.md CHANGELOG.md
 if ($LASTEXITCODE) { throw 'git archive failed' }
 "wrote $out ($([int]((Get-Item $out).Length / 1KB)) KB)"
