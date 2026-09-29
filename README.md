@@ -23,7 +23,7 @@ One account or several, updated in the background, in one click.
 - **All limits in one click.** The list shows each account's 5-hour window, 7-day window and Fable weekly limit, with countdowns to the resets.
 - **Finds your accounts.** On first run it picks up the Claude Code logins on your PC (and [xndr-claude](https://github.com/mrcsXndr/xndr-claude) accounts if you use it).
 - **Two styles.** **Rings** gives each limit its own ring. **Combined** puts one limit as a pie in the middle and the other as the ring around it, with both percentages beside it. You choose which limit goes in the middle.
-- **Settings you can edit.** Rename accounts, choose each account's style and rings, show or hide account names and captions, rename the captions, and set how often it refreshes.
+- **Settings you can edit.** Rename accounts, choose each account's style and rings, show or hide account names and captions, rename the captions, set how often it refreshes, and turn animations on or off.
 - **Stays out of the way.** Refreshes every 30 minutes by default (5 minutes at the most frequent), and never more than once a minute when you refresh by hand. Catches up after sleep. Hides during full-screen apps. Follows the light or dark theme.
 - **Nothing to install besides itself.** It's plain PowerShell and WPF, which ship with Windows, so there are no runtimes, services or admin rights involved.
 
@@ -54,7 +54,7 @@ Running either one again updates you to the latest release and keeps your settin
 | --- | --- |
 | **Click** the rings | Open the account list |
 | **Tick** an account | Show it on the taskbar |
-| **⚙ Settings** | Rename accounts, pick Rings or Combined, choose rings, toggle names and captions, set the refresh interval. Changes preview on the taskbar right away; **Save** keeps them and **Cancel** (or Esc) undoes them |
+| **⚙ Settings** | Rename accounts, pick Rings or Combined, choose rings, toggle names, captions and animations, set the refresh interval. Changes preview on the taskbar right away; **Save** keeps them and **Cancel** (or Esc) undoes them |
 | **⟳** | Refresh now (at most once a minute) |
 | **Ctrl + drag** | Move the rings along the taskbar |
 | **Right-click** | Refresh · Settings · Scan for accounts · Start with Windows · Uninstall · Exit |
@@ -82,6 +82,7 @@ Everything is stored in `%APPDATA%\claude-usage-widget\config.json`. To open it,
   "refreshMinutes": 30,
   "showNames": true,
   "showCaptions": true,
+  "animations": true,
   "captions": { "5h": "5h", "7d": "7d", "fable": "Fable" },
   "accounts": [
     { "name": "claude-code", "label": "Personal", "source": "claude-code", "taskbar": true, "limits": ["5h", "7d", "fable"] },
@@ -99,7 +100,7 @@ Everything is stored in `%APPDATA%\claude-usage-widget\config.json`. To open it,
 | `command` | Whatever the command prints, for example a password manager CLI. |
 | `env` | An environment variable. |
 
-`"refreshMinutes"` sets how often it refreshes, 5 at the lowest. `"showNames"` and `"showCaptions"` turn the account names and ring captions on the taskbar on or off.
+`"refreshMinutes"` sets how often it refreshes, 5 at the lowest. `"showNames"` and `"showCaptions"` turn the account names and ring captions on the taskbar on or off. `"animations"` turns the popup's fade and slide on or off.
 
 For each account, `"style": "combined"` shows 5h and 7d in one dial, and `"pie"` (`"5h"` or `"7d"`) picks which one goes in the middle. `"limits"` picks the rings in the Rings style. `"hidden": true` leaves an account out of the list and off the taskbar. `"fable": false` makes that account skip the Fable probe (see below).
 </details>

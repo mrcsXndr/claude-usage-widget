@@ -516,9 +516,10 @@ function Set-WidgetPosition {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Claude usage" WindowStyle="None" AllowsTransparency="True" Background="Transparent"
-        Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize" Width="396" SizeToContent="Height"
+        Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize" Width="396" Height="600" Opacity="0"
         UseLayoutRounding="True" FontFamily="Segoe UI Variable Text, Segoe UI">
-  <Border x:Name="Card" Background="$($Theme.card)" BorderBrush="$($Theme.border)" BorderThickness="1" CornerRadius="10" Padding="8" Margin="8">
+  <Border x:Name="Card" Background="$($Theme.card)" BorderBrush="$($Theme.border)" BorderThickness="1" CornerRadius="10" Padding="8" Margin="8" VerticalAlignment="Bottom">
+    <Border.RenderTransform><TranslateTransform x:Name="Slide"/></Border.RenderTransform>
     <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="3" Opacity="0.35"/></Border.Effect>
     <Border.Resources>
       <Style x:Key="Seg" TargetType="RadioButton">
@@ -658,10 +659,11 @@ function Set-WidgetPosition {
       </DockPanel>
       <StackPanel x:Name="List"/>
       <StackPanel x:Name="CaptionPanel" Margin="10,10,10,2" Visibility="Collapsed">
-        <TextBlock Text="Taskbar" FontSize="11" Foreground="$($Theme.sub)" Margin="0,0,0,8"/>
+        <TextBlock Text="Display" FontSize="11" Foreground="$($Theme.sub)" Margin="0,0,0,8"/>
         <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
           <CheckBox x:Name="OptNames" Content="Account names" Margin="0,0,18,0"/>
-          <CheckBox x:Name="OptCaptions" Content="Captions"/>
+          <CheckBox x:Name="OptCaptions" Content="Captions" Margin="0,0,18,0"/>
+          <CheckBox x:Name="OptAnim" Content="Animations"/>
         </StackPanel>
         <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
           <TextBlock Text="Refresh every" FontSize="11.5" Foreground="$($Theme.fg)" VerticalAlignment="Center" Margin="0,0,8,0"/>
@@ -682,7 +684,7 @@ function Set-WidgetPosition {
 "@
 $popup = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $popupXaml))
 $PopupEls = @{}
-foreach ($n in 'Card', 'RefreshBtn', 'EditBtn', 'SaveBtn', 'CancelBtn', 'Title', 'Status', 'List', 'CaptionPanel', 'Cap_5h', 'Cap_7d', 'Cap_fable', 'OptNames', 'OptCaptions', 'OptRefresh', 'Footer') { $PopupEls[$n] = $popup.FindName($n) }
+foreach ($n in 'Card', 'Slide', 'RefreshBtn', 'EditBtn', 'SaveBtn', 'CancelBtn', 'Title', 'Status', 'List', 'CaptionPanel', 'Cap_5h', 'Cap_7d', 'Cap_fable', 'OptNames', 'OptCaptions', 'OptAnim', 'OptRefresh', 'Footer') { $PopupEls[$n] = $popup.FindName($n) }
 $script:editing = $false
 
 function Get-BarXaml($key, $win) {
@@ -850,6 +852,7 @@ function Update-Popup {
     foreach ($k in $LimitKeys) { $PopupEls["Cap_$k"].Text = Get-Caption $k }
     $PopupEls.OptNames.IsChecked = Test-Option 'showNames'
     $PopupEls.OptCaptions.IsChecked = Test-Option 'showCaptions'
+    $PopupEls.OptAnim.IsChecked = Test-Option 'animations'
     $PopupEls.OptRefresh.Text = "$(Get-RefreshMinutes)"
     $script:loadingCaptions = $false
   }
@@ -872,7 +875,7 @@ foreach ($k in $LimitKeys) {
   })
 }
 
-foreach ($opt in @(@('OptNames', 'showNames'), @('OptCaptions', 'showCaptions'))) {
+foreach ($opt in @(@('OptNames', 'showNames'), @('OptCaptions', 'showCaptions'), @('OptAnim', 'animations'))) {
   $PopupEls[$opt[0]].Tag = $opt[1]
   $PopupEls[$opt[0]].Add_Click({
     param($s)
@@ -893,12 +896,46 @@ $PopupEls.OptRefresh.Add_TextChanged({
 })
 $PopupEls.OptRefresh.Add_LostKeyboardFocus({ param($s) $s.Text = "$(Get-RefreshMinutes)" })
 
-# Anchor the list above (or below, for a top taskbar) the widget, keeping it on screen.
+# The popup spans the work area's full height with the card pinned to the taskbar edge, so
+# switching between the list and settings never resizes (and never flickers) the window.
 function Set-PopupPosition {
   $wa = [Windows.SystemParameters]::WorkArea
-  $x = $widget.Left + $widget.ActualWidth / 2 - $popup.ActualWidth / 2
-  $popup.Left = [Math]::Max($wa.Left, [Math]::Min($wa.Right - $popup.ActualWidth, $x))
-  $popup.Top = if ($wa.Top -gt 0) { $wa.Top } else { $wa.Bottom - $popup.ActualHeight }
+  $atTop = $wa.Top -gt 0
+  $popup.Height = $wa.Height
+  $popup.Top = $wa.Top
+  $PopupEls.Card.VerticalAlignment = if ($atTop) { 'Top' } else { 'Bottom' }
+  $x = $widget.Left + $widget.ActualWidth / 2 - $popup.Width / 2
+  $popup.Left = [Math]::Max($wa.Left, [Math]::Min($wa.Right - $popup.Width, $x))
+}
+
+function New-Ease([double]$from, [double]$to, [int]$ms) {
+  $a = New-Object Windows.Media.Animation.DoubleAnimation($from, $to, (New-Object Windows.Duration([TimeSpan]::FromMilliseconds($ms))))
+  $a.EasingFunction = New-Object Windows.Media.Animation.CubicEase -Property @{ EasingMode = 'EaseOut' }
+  return $a
+}
+
+# Fade in and slide from the taskbar edge; with animations off, just appear.
+function Start-PopupEntrance {
+  if (Test-Option 'animations') {
+    $dy = if ([Windows.SystemParameters]::WorkArea.Top -gt 0) { -10 } else { 10 }
+    $popup.BeginAnimation([Windows.Window]::OpacityProperty, (New-Ease 0 1 170))
+    $PopupEls.Slide.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, (New-Ease $dy 0 220))
+  } else {
+    $popup.BeginAnimation([Windows.Window]::OpacityProperty, $null)
+    $PopupEls.Slide.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $null)
+    $popup.Opacity = 1
+  }
+}
+
+# Soft cross-fade when switching between the list and settings.
+function Start-ContentFade {
+  if (Test-Option 'animations') { $PopupEls.Card.BeginAnimation([Windows.UIElement]::OpacityProperty, (New-Ease 0.35 1 160)) }
+}
+
+function Switch-PopupMode([scriptblock]$change) {
+  & $change
+  Update-Popup
+  Start-ContentFade
 }
 
 # Settings work on the live config (so the taskbar previews them) with a copy to go back to.
@@ -916,32 +953,39 @@ function Stop-Editing([bool]$keep) {
   Update-Widget
 }
 
+# Content and position are settled while the window is still fully transparent, so the first
+# frame on screen is the finished one.
 function Show-Popup([bool]$editing) {
   if ($editing) { Start-Editing } else { $script:editing = $false }
+  $popup.BeginAnimation([Windows.Window]::OpacityProperty, $null)
+  $popup.Opacity = 0
   Update-Popup
+  Set-PopupPosition
   $popup.Show()
   [void]$popup.Activate()
-  Set-PopupPosition
+  Start-PopupEntrance
 }
 
-# Clicking away keeps settings changes; only Cancel and Esc throw them away.
+# Clicking away keeps settings changes; only Cancel and Esc throw them away. Going fully
+# transparent before hiding means Windows has no stale frame to flash on the next open.
 function Hide-Popup {
+  $popup.BeginAnimation([Windows.Window]::OpacityProperty, $null)
+  $popup.Opacity = 0
   $popup.Hide()
   Stop-Editing $true
 }
 
 $script:popupClosedAt = [DateTime]::MinValue
 $popup.Add_Deactivated({ Hide-Popup; $script:popupClosedAt = Get-Date })
-$popup.Add_SizeChanged({ Set-PopupPosition })
 $popup.Add_KeyDown({
   param($s, $e)
   if ($e.Key -ne 'Escape') { return }
-  if ($script:editing) { Stop-Editing $false; Update-Popup } else { Hide-Popup }
+  if ($script:editing) { Switch-PopupMode { Stop-Editing $false } } else { Hide-Popup }
 })
 $PopupEls.RefreshBtn.Add_Click({ Start-Refresh })
-$PopupEls.EditBtn.Add_Click({ Start-Editing; Update-Popup })
-$PopupEls.SaveBtn.Add_Click({ Stop-Editing $true; Update-Popup })
-$PopupEls.CancelBtn.Add_Click({ Stop-Editing $false; Update-Popup })
+$PopupEls.EditBtn.Add_Click({ Switch-PopupMode { Start-Editing } })
+$PopupEls.SaveBtn.Add_Click({ Switch-PopupMode { Stop-Editing $true } })
+$PopupEls.CancelBtn.Add_Click({ Switch-PopupMode { Stop-Editing $false } })
 
 # Rebuilding the list while someone types in it would steal their focus, so edits wait.
 function Update-All {
