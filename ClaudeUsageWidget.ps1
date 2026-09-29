@@ -76,6 +76,9 @@ public static class CuwNative {
 }
 '@
 
+# Set CUW_DEBUG=1 to log popup show/hide decisions to widget.log.
+function Write-Trace([string]$msg) { if ($env:CUW_DEBUG -eq '1') { Write-Log "trace: $msg" } }
+
 $StartupLink   = Join-Path ([Environment]::GetFolderPath('Startup')) 'Claude Usage Widget.lnk'
 $MinRefreshGap = 60  # seconds between refreshes, however they're triggered
 
@@ -956,6 +959,9 @@ function Stop-Editing([bool]$keep) {
 # Content and position are settled while the window is still fully transparent, so the first
 # frame on screen is the finished one.
 function Show-Popup([bool]$editing) {
+  Write-Trace "show (editing=$editing)"
+  $script:pendingHide = $false
+  $hideTimer.Stop()
   if ($editing) { Start-Editing } else { $script:editing = $false }
   $popup.BeginAnimation([Windows.Window]::OpacityProperty, $null)
   $popup.Opacity = 0
@@ -966,17 +972,32 @@ function Show-Popup([bool]$editing) {
   Start-PopupEntrance
 }
 
-# Clicking away keeps settings changes; only Cancel and Esc throw them away. Going fully
-# transparent before hiding means Windows has no stale frame to flash on the next open.
+# Clicking away keeps settings changes; only Cancel and Esc throw them away.
+# Windows re-shows a transparent window's last drawn frame when it reappears, so before hiding
+# the popup goes back to the main list at zero opacity, and only hides once that frame is drawn.
+$script:pendingHide = $false
+$hideTimer = New-Object Windows.Threading.DispatcherTimer
+$hideTimer.Interval = [TimeSpan]::FromMilliseconds(80)
+$hideTimer.Add_Tick({
+  $hideTimer.Stop()
+  Write-Trace "hide timer: pending=$($script:pendingHide)"
+  if ($script:pendingHide) { $script:pendingHide = $false; $popup.Hide() }
+})
+
 function Hide-Popup {
+  Write-Trace "hide requested: visible=$($popup.IsVisible) pending=$($script:pendingHide)"
+  if (-not $popup.IsVisible -or $script:pendingHide) { return }
+  Stop-Editing $true
   $popup.BeginAnimation([Windows.Window]::OpacityProperty, $null)
   $popup.Opacity = 0
-  $popup.Hide()
-  Stop-Editing $true
+  Update-Popup
+  $script:pendingHide = $true
+  $hideTimer.Start()
 }
 
 $script:popupClosedAt = [DateTime]::MinValue
-$popup.Add_Deactivated({ Hide-Popup; $script:popupClosedAt = Get-Date })
+$popup.Add_Deactivated({ Write-Trace 'popup deactivated'; Hide-Popup; $script:popupClosedAt = Get-Date })
+$popup.Add_Activated({ Write-Trace 'popup activated' })
 $popup.Add_KeyDown({
   param($s, $e)
   if ($e.Key -ne 'Escape') { return }
@@ -1014,8 +1035,9 @@ $widget.Add_MouseLeftButtonDown({
   }
 })
 $widget.Add_MouseLeftButtonUp({
+  Write-Trace "click: dragged=$($script:dragged) visible=$($popup.IsVisible) pending=$($script:pendingHide) sinceClose=$([int64]((Get-Date) - $script:popupClosedAt).TotalMilliseconds)ms"
   if ($script:dragged) { return }
-  if ($popup.IsVisible) { Hide-Popup; return }
+  if ($popup.IsVisible -and -not $script:pendingHide) { Hide-Popup; return }
   # Clicking the widget first deactivates (and hides) an open list; don't reopen it straight away.
   if (((Get-Date) - $script:popupClosedAt).TotalMilliseconds -lt 300) { return }
   Show-Popup $false
