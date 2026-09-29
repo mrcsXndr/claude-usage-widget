@@ -1,0 +1,5 @@
+# Accounts and state live in %APPDATA%\claude-usage-widget, never here.
+config.json
+state.json
+*.log
+.env*
