@@ -11,7 +11,7 @@ One account or several, updated in the background, in one click.
 [![No dependencies](https://img.shields.io/badge/dependencies-none-4CC38A)](#how-it-works)
 [![License: MIT](https://img.shields.io/badge/license-MIT-D97757)](LICENSE)
 
-<img src="docs/widget.png" width="820" alt="Usage rings on the Windows 11 taskbar, with the account list open above them">
+<img src="docs/screenshot.png" width="474" alt="Usage rings for three accounts on the Windows 11 taskbar, with the account list open above them">
 
 </div>
 
