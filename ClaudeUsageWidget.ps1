@@ -115,11 +115,17 @@ function Import-UiConfig {
 }
 
 function Save-UiConfig {
-  if ($Demo) { return }
+  if ($Demo -or $script:editing) { return }
   try { Save-Config $script:config } catch { Write-Log "save config: $_" }
 }
 
-function Get-RefreshMinutes { [Math]::Max(1, [int]$script:config.refreshMinutes) }
+function Get-RefreshMinutes {
+  $m = [int]$script:config.refreshMinutes
+  if (-not $m) { return 30 }
+  return [Math]::Max(5, $m)
+}
+# Taskbar options that default to on.
+function Test-Option($key) { $script:config.$key -ne $false }
 function Get-AcctCfgs { @($script:config.accounts | Where-Object { $_ }) }
 function Get-AcctCfg($name) { Get-AcctCfgs | Where-Object name -eq $name | Select-Object -First 1 }
 function Get-Visible { @(Get-AcctCfgs | Where-Object { $_.hidden -ne $true }) }
@@ -331,7 +337,7 @@ function Complete-Refresh {
   } finally {
     $j.ps.Dispose()
   }
-  Import-UiConfig
+  if (-not $script:editing) { Import-UiConfig }
   $script:forcePopup = $true
   Update-All
 }
@@ -378,7 +384,7 @@ function New-RingElement($pct, [string]$caption, [bool]$gapAfter) {
     <Path Name="Arc" StrokeThickness="3.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
     <TextBlock Text="$text" FontSize="10.5" FontWeight="SemiBold" Foreground="$($Theme.fg)" HorizontalAlignment="Center" VerticalAlignment="Center"/>
   </Grid>
-  <TextBlock Text="$(Esc $caption)" FontSize="10" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="4,0,0,0"/>
+  $(if (Test-Option 'showCaptions') { "<TextBlock Text=`"$(Esc $caption)`" FontSize=`"10`" Foreground=`"$($Theme.sub)`" VerticalAlignment=`"Center`" Margin=`"4,0,0,0`"/>" })
 </StackPanel>
 "@)
   Set-Ring ($el.FindName('Arc')) $pct
@@ -403,14 +409,16 @@ function Set-Pie($path, $pct, [double]$c = 15, [double]$r = 8.5) {
 }
 
 # One dial for two limits: a pie in the middle, a ring around it, and both percentages beside it
-# (a filled dot marks the pie, a hollow one the ring).
+# (a filled dot marks the pie, a hollow one the ring; both drawn in the same box so the lines align).
 function New-CombinedElement($cfg, $res) {
   $pieKey = if ($cfg.pie -eq '7d') { '7d' } else { '5h' }
   $lines = foreach ($k in '5h', '7d') {
     $w = Get-Win $res $k
     $pct = if ($null -ne $w.pct) { "$(Format-Pct $w.pct)%" } elseif ($script:job) { $ELL } else { $DASH }
-    $mark = if ($k -eq $pieKey) { [char]0x25CF } else { [char]0x25CB }
-    "<TextBlock FontSize=`"10`"><Run Text=`"$mark `" Foreground=`"$(Get-UsageColor $w.pct)`"/><Run Text=`"$pct`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`"/><Run Text=`" $(Esc (Get-Caption $k))`" Foreground=`"$($Theme.sub)`"/></TextBlock>"
+    $color = Get-UsageColor $w.pct
+    $mark = if ($k -eq $pieKey) { "<Ellipse Width=`"7`" Height=`"7`" Fill=`"$color`"/>" } else { "<Ellipse Width=`"7`" Height=`"7`" Stroke=`"$color`" StrokeThickness=`"1.6`"/>" }
+    $caption = if (Test-Option 'showCaptions') { "<Run Text=`" $(Esc (Get-Caption $k))`" Foreground=`"$($Theme.sub)`"/>" } else { '' }
+    "<StackPanel Orientation=`"Horizontal`"><Grid Width=`"8`" Height=`"8`" VerticalAlignment=`"Center`" Margin=`"0,1,5,0`">$mark</Grid><TextBlock FontSize=`"10`"><Run Text=`"$pct`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`"/>$caption</TextBlock></StackPanel>"
   }
   $el = [Windows.Markup.XamlReader]::Parse(@"
 <StackPanel $ns Orientation="Horizontal">
@@ -449,7 +457,6 @@ function Get-AccountTip($cfg, $res) {
 function Update-Widget {
   $WidgetEls.Groups.Children.Clear()
   $cfgs = @(Get-TaskbarCfgs)
-  $multi = $cfgs.Count -gt 1
   if (-not $cfgs.Count) {
     $g = New-Object Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; Background = '#01000000' }
     [void]$g.Children.Add((New-RingElement $null (Get-Caption '5h') $true))
@@ -463,7 +470,7 @@ function Update-Widget {
     if ($i -gt 0) {
       [void]$g.Children.Add((New-Object Windows.Controls.Border -Property @{ Width = 1; Height = 22; Background = $Theme.ring; Margin = '10,0,10,0' }))
     }
-    if ($multi) {
+    if (Test-Option 'showNames') {
       [void]$g.Children.Add((New-Object Windows.Controls.TextBlock -Property @{
         Text = (Get-Label $cfg); FontSize = 10.5; Foreground = $Theme.fg; Opacity = 0.85; MaxWidth = 90
         TextTrimming = 'CharacterEllipsis'; VerticalAlignment = 'Center'; Margin = '0,0,8,0'
@@ -532,6 +539,42 @@ function Set-WidgetPosition {
                   <Setter TargetName="Bd" Property="BorderBrush" Value="$($Colors.accent)"/>
                   <Setter Property="Foreground" Value="White"/>
                 </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="TextBtn" TargetType="Button">
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Foreground" Value="$($Theme.fg)"/>
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="Bg" Background="$($Theme.field)" BorderBrush="$($Theme.border)" BorderThickness="1" CornerRadius="5" Padding="12,4" Margin="6,0,0,0">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bg" Property="BorderBrush" Value="$($Theme.sub)"/></Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="AccentBtn" TargetType="Button">
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="Bg" Background="$($Colors.accent)" BorderBrush="$($Colors.accent)" BorderThickness="1" CornerRadius="5" Padding="14,4" Margin="6,0,0,0">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bg" Property="Opacity" Value="0.88"/></Trigger>
               </ControlTemplate.Triggers>
             </ControlTemplate>
           </Setter.Value>
@@ -606,6 +649,8 @@ function Set-WidgetPosition {
       <DockPanel Margin="8,4,2,6">
         <Button x:Name="RefreshBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Content="&#xE72C;" VerticalAlignment="Top"/>
         <Button x:Name="EditBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Content="&#xE713;" ToolTip="Settings" VerticalAlignment="Top"/>
+        <Button x:Name="SaveBtn" DockPanel.Dock="Right" Style="{StaticResource AccentBtn}" Content="Save" Visibility="Collapsed" VerticalAlignment="Center"/>
+        <Button x:Name="CancelBtn" DockPanel.Dock="Right" Style="{StaticResource TextBtn}" Content="Cancel" Visibility="Collapsed" VerticalAlignment="Center"/>
         <StackPanel>
           <TextBlock x:Name="Title" Text="Claude usage" FontSize="14" FontWeight="SemiBold" Foreground="$($Theme.fg)"/>
           <TextBlock x:Name="Status" FontSize="11" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,1,0,0"/>
@@ -613,7 +658,17 @@ function Set-WidgetPosition {
       </DockPanel>
       <StackPanel x:Name="List"/>
       <StackPanel x:Name="CaptionPanel" Margin="10,10,10,2" Visibility="Collapsed">
-        <TextBlock Text="Ring captions" FontSize="11" Foreground="$($Theme.sub)" Margin="0,0,0,6"/>
+        <TextBlock Text="Taskbar" FontSize="11" Foreground="$($Theme.sub)" Margin="0,0,0,8"/>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+          <CheckBox x:Name="OptNames" Content="Account names" Margin="0,0,18,0"/>
+          <CheckBox x:Name="OptCaptions" Content="Captions"/>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+          <TextBlock Text="Refresh every" FontSize="11.5" Foreground="$($Theme.fg)" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBox x:Name="OptRefresh" Width="46" TextAlignment="Center" ToolTip="Minutes between refreshes (5 or more)"/>
+          <TextBlock Text="minutes (5 or more)" FontSize="11.5" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="8,0,0,0"/>
+        </StackPanel>
+        <TextBlock Text="Captions" FontSize="11" Foreground="$($Theme.sub)" Margin="0,0,0,6"/>
         <UniformGrid Columns="3">
           <DockPanel Margin="0,0,6,0"><TextBlock DockPanel.Dock="Top" Text="5-hour" FontSize="10.5" Foreground="$($Theme.sub)" Margin="0,0,0,3"/><TextBox x:Name="Cap_5h"/></DockPanel>
           <DockPanel Margin="3,0,3,0"><TextBlock DockPanel.Dock="Top" Text="7-day" FontSize="10.5" Foreground="$($Theme.sub)" Margin="0,0,0,3"/><TextBox x:Name="Cap_7d"/></DockPanel>
@@ -627,7 +682,7 @@ function Set-WidgetPosition {
 "@
 $popup = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $popupXaml))
 $PopupEls = @{}
-foreach ($n in 'Card', 'RefreshBtn', 'EditBtn', 'Title', 'Status', 'List', 'CaptionPanel', 'Cap_5h', 'Cap_7d', 'Cap_fable', 'Footer') { $PopupEls[$n] = $popup.FindName($n) }
+foreach ($n in 'Card', 'RefreshBtn', 'EditBtn', 'SaveBtn', 'CancelBtn', 'Title', 'Status', 'List', 'CaptionPanel', 'Cap_5h', 'Cap_7d', 'Cap_fable', 'OptNames', 'OptCaptions', 'OptRefresh', 'Footer') { $PopupEls[$n] = $popup.FindName($n) }
 $script:editing = $false
 
 function Get-BarXaml($key, $win) {
@@ -681,7 +736,6 @@ function New-AccountRow($cfg, $shownNames) {
       <TextBox Name="Label" Text="$label" ToolTip="Account name"/>
     </DockPanel>
     <DockPanel Margin="26,9,0,0">
-      <CheckBox Name="Vis" DockPanel.Dock="Right" Content="In list" ToolTip="Untick to hide this account (e.g. a duplicate)"/>
       <StackPanel Orientation="Horizontal">
         <TextBlock Text="Style" Width="48" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
         <RadioButton Name="S_rings" Style="{DynamicResource Seg}" GroupName="style_$id" Content="Rings" IsChecked="$(-not $combined)"/>
@@ -726,16 +780,6 @@ function New-AccountRow($cfg, $shownNames) {
       $rb.Tag = @{ name = $cfg.name; value = $opt }
       $rb.Add_Checked({ param($s) Set-AcctProp $s.Tag.name 'pie' $s.Tag.value; Save-UiConfig; Update-Widget })
     }
-    $vis = $row.FindName('Vis')
-    $vis.IsChecked = $cfg.hidden -ne $true
-    $vis.Tag = $cfg.name
-    $vis.Add_Click({
-      param($s)
-      Set-AcctProp $s.Tag 'hidden' (-not [bool]$s.IsChecked)
-      if (-not $s.IsChecked) { Set-AcctProp $s.Tag 'taskbar' $false }
-      Save-UiConfig; Update-Widget; Update-Popup
-    })
-    if ($cfg.hidden -eq $true) { $row.Opacity = 0.5 }
   } else {
     $note = Get-Note $res
     $bars = (Get-BarXaml '5h' (Get-Win $res '5h')) + (Get-BarXaml '7d' (Get-Win $res '7d'))
@@ -776,10 +820,12 @@ function Update-RefreshButton {
 
 function Update-Popup {
   Update-RefreshButton
-  $PopupEls.EditBtn.Content = if ($script:editing) { [string][char]0xE73E } else { [string][char]0xE713 }
-  $PopupEls.EditBtn.ToolTip = if ($script:editing) { 'Done' } else { 'Settings' }
+  $normal = if ($script:editing) { 'Collapsed' } else { 'Visible' }
+  $edit = if ($script:editing) { 'Visible' } else { 'Collapsed' }
+  $PopupEls.RefreshBtn.Visibility = $normal; $PopupEls.EditBtn.Visibility = $normal
+  $PopupEls.SaveBtn.Visibility = $edit; $PopupEls.CancelBtn.Visibility = $edit
   $PopupEls.Title.Text = if ($script:editing) { 'Settings' } else { 'Claude usage' }
-  $PopupEls.Status.Text = if ($script:editing) { 'Changes save as you type' }
+  $PopupEls.Status.Text = if ($script:editing) { 'Preview only until you save' }
     elseif ($script:job) { if ($script:job.discover) { "Scanning for accounts$ELL" } else { "Refreshing$ELL" } }
     elseif ($script:lastError) { "Error: $($script:lastError)" }
     elseif ($script:configError) { $script:configError }
@@ -789,7 +835,7 @@ function Update-Popup {
 
   $PopupEls.List.Children.Clear()
   $shown = @(Get-TaskbarCfgs | ForEach-Object name)
-  $cfgs = if ($script:editing) { Get-AcctCfgs } else { Get-Visible }
+  $cfgs = Get-Visible
   foreach ($cfg in $cfgs) { [void]$PopupEls.List.Children.Add((New-AccountRow $cfg $shown)) }
   if (-not @($cfgs).Count) {
     $empty = New-Object Windows.Controls.TextBlock
@@ -802,6 +848,9 @@ function Update-Popup {
   if ($script:editing) {
     $script:loadingCaptions = $true
     foreach ($k in $LimitKeys) { $PopupEls["Cap_$k"].Text = Get-Caption $k }
+    $PopupEls.OptNames.IsChecked = Test-Option 'showNames'
+    $PopupEls.OptCaptions.IsChecked = Test-Option 'showCaptions'
+    $PopupEls.OptRefresh.Text = "$(Get-RefreshMinutes)"
     $script:loadingCaptions = $false
   }
   $PopupEls.Footer.Text = if ($script:editing) {
@@ -823,6 +872,27 @@ foreach ($k in $LimitKeys) {
   })
 }
 
+foreach ($opt in @(@('OptNames', 'showNames'), @('OptCaptions', 'showCaptions'))) {
+  $PopupEls[$opt[0]].Tag = $opt[1]
+  $PopupEls[$opt[0]].Add_Click({
+    param($s)
+    $script:config | Add-Member -Force -NotePropertyName $s.Tag -NotePropertyValue ([bool]$s.IsChecked)
+    Save-UiConfig
+    Update-Widget
+  })
+}
+# Minutes between refreshes: saved once it's a whole number from 5 to 1440; leaving the box restores the saved value.
+$PopupEls.OptRefresh.Add_TextChanged({
+  param($s)
+  if ($script:loadingCaptions) { return }
+  $m = 0
+  if ([int]::TryParse($s.Text.Trim(), [ref]$m) -and $m -ge 5 -and $m -le 1440) {
+    $script:config | Add-Member -Force refreshMinutes $m
+    Save-UiConfig
+  }
+})
+$PopupEls.OptRefresh.Add_LostKeyboardFocus({ param($s) $s.Text = "$(Get-RefreshMinutes)" })
+
 # Anchor the list above (or below, for a top taskbar) the widget, keeping it on screen.
 function Set-PopupPosition {
   $wa = [Windows.SystemParameters]::WorkArea
@@ -831,25 +901,47 @@ function Set-PopupPosition {
   $popup.Top = if ($wa.Top -gt 0) { $wa.Top } else { $wa.Bottom - $popup.ActualHeight }
 }
 
+# Settings work on the live config (so the taskbar previews them) with a copy to go back to.
+function Start-Editing {
+  $script:configBackup = $script:config | ConvertTo-Json -Depth 8
+  $script:editing = $true
+}
+
+function Stop-Editing([bool]$keep) {
+  if (-not $script:editing) { return }
+  $script:editing = $false
+  if ($keep) { Save-UiConfig }
+  elseif ($script:configBackup) { $script:config = $script:configBackup | ConvertFrom-Json }
+  $script:configBackup = $null
+  Update-Widget
+}
+
 function Show-Popup([bool]$editing) {
-  $script:editing = $editing
+  if ($editing) { Start-Editing } else { $script:editing = $false }
   Update-Popup
   $popup.Show()
   [void]$popup.Activate()
   Set-PopupPosition
 }
 
+# Clicking away keeps settings changes; only Cancel and Esc throw them away.
 function Hide-Popup {
   $popup.Hide()
-  $script:editing = $false
+  Stop-Editing $true
 }
 
 $script:popupClosedAt = [DateTime]::MinValue
 $popup.Add_Deactivated({ Hide-Popup; $script:popupClosedAt = Get-Date })
 $popup.Add_SizeChanged({ Set-PopupPosition })
-$popup.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Escape') { Hide-Popup } })
+$popup.Add_KeyDown({
+  param($s, $e)
+  if ($e.Key -ne 'Escape') { return }
+  if ($script:editing) { Stop-Editing $false; Update-Popup } else { Hide-Popup }
+})
 $PopupEls.RefreshBtn.Add_Click({ Start-Refresh })
-$PopupEls.EditBtn.Add_Click({ $script:editing = -not $script:editing; Update-Popup })
+$PopupEls.EditBtn.Add_Click({ Start-Editing; Update-Popup })
+$PopupEls.SaveBtn.Add_Click({ Stop-Editing $true; Update-Popup })
+$PopupEls.CancelBtn.Add_Click({ Stop-Editing $false; Update-Popup })
 
 # Rebuilding the list while someone types in it would steal their focus, so edits wait.
 function Update-All {
