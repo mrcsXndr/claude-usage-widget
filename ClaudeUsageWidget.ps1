@@ -226,15 +226,39 @@ function Format-Reset($iso) {
   $dt = ConvertTo-LocalTime $iso
   if ($null -eq $dt) { return '' }
   $span = $dt - (Get-Date)
-  if ($span.TotalMinutes -le 0) { return 'reset now' }
+  if ($span.TotalMinutes -le 0) { return '' }
   if ($span.TotalHours -lt 1) { return 'in {0}m' -f [int][Math]::Ceiling($span.TotalMinutes) }
   if ($span.TotalHours -lt 24) { return 'in {0}h {1:00}m' -f [int][Math]::Floor($span.TotalHours), $span.Minutes }
   return $dt.ToString('ddd HH:mm')
 }
 
-function Get-Win($res, $key) {
+function Get-RawWin($res, $key) {
   if (-not $res) { return $null }
   switch ($key) { '5h' { $res.five_h } '7d' { $res.seven_d } 'fable' { $res.fable } }
+}
+
+# A window whose reset time has passed since the last read has started over: show it as 0%
+# until the next refresh (which the minute timer then triggers) brings the real number.
+function Get-Win($res, $key) {
+  $w = Get-RawWin $res $key
+  if ($w -and $null -ne $w.pct -and $w.reset -and (ConvertTo-LocalTime $w.reset) -le (Get-Date)) {
+    return [pscustomobject]@{ pct = 0; reset = $null }
+  }
+  return $w
+}
+
+function Test-ResetPassed {
+  if (-not $script:updated) { return $false }
+  foreach ($res in $script:accounts) {
+    foreach ($k in $LimitKeys) {
+      $w = Get-RawWin $res $k
+      if ($w -and $w.reset) {
+        $t = ConvertTo-LocalTime $w.reset
+        if ($t -le (Get-Date) -and $t -gt $script:updated) { return $true }
+      }
+    }
+  }
+  return $false
 }
 
 function Get-Cooldown {
@@ -565,7 +589,7 @@ function Get-Note($res) {
   }
 }
 
-function New-AccountRow($cfg, $shownNames, $last) {
+function New-AccountRow($cfg, $shownNames) {
   $res = Get-Result $cfg.name
   $label = Esc (Get-Label $cfg)
   $plan = Esc $(if ($cfg.plan) { "   $($cfg.plan)" } else { '' })
@@ -610,8 +634,6 @@ function New-AccountRow($cfg, $shownNames, $last) {
     })
     if ($cfg.hidden -eq $true) { $row.Opacity = 0.5 }
   } else {
-    $badges = @()
-    if ($last -and $cfg.name -eq $last) { $badges += 'last used' }
     $note = Get-Note $res
     $bars = (Get-BarXaml '5h' (Get-Win $res '5h')) + (Get-BarXaml '7d' (Get-Win $res '7d'))
     $fable = Get-Win $res 'fable'
@@ -625,7 +647,6 @@ function New-AccountRow($cfg, $shownNames, $last) {
   <StackPanel>
     <DockPanel>
       <CheckBox Name="Tb" DockPanel.Dock="Left" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="Show on the taskbar"/>
-      <TextBlock DockPanel.Dock="Right" Text="$(Esc ($badges -join " $DOT "))" FontSize="11" Foreground="$($Colors.ok)" VerticalAlignment="Center" Margin="8,0,0,0"/>
       <TextBlock TextTrimming="CharacterEllipsis" VerticalAlignment="Center"><Run Text="$label" FontSize="13" FontWeight="SemiBold" Foreground="$($Theme.fg)"/><Run Text="$plan" FontSize="11" Foreground="$($Theme.sub)"/></TextBlock>
     </DockPanel>
     <StackPanel Margin="26,0,0,0">$bars$noteXaml</StackPanel>
@@ -665,9 +686,8 @@ function Update-Popup {
 
   $PopupEls.List.Children.Clear()
   $shown = @(Get-TaskbarCfgs | ForEach-Object name)
-  $last = Get-LastUsed
   $cfgs = if ($script:editing) { Get-AcctCfgs } else { Get-Visible }
-  foreach ($cfg in $cfgs) { [void]$PopupEls.List.Children.Add((New-AccountRow $cfg $shown $last)) }
+  foreach ($cfg in $cfgs) { [void]$PopupEls.List.Children.Add((New-AccountRow $cfg $shown)) }
   if (-not @($cfgs).Count) {
     $empty = New-Object Windows.Controls.TextBlock
     $empty.Text = if ($script:job) { "Looking for accounts$ELL" } else { 'No accounts found. Log in with Claude Code (run claude), then right-click the rings > Scan for accounts.' }
@@ -874,7 +894,8 @@ $topTimer.Add_Tick({
 $minuteTimer = New-Object Windows.Threading.DispatcherTimer
 $minuteTimer.Interval = [TimeSpan]::FromMinutes(1)
 $minuteTimer.Add_Tick({
-  if (-not $script:job -and ((Get-Date) - $script:lastTry).TotalMinutes -ge (Get-RefreshMinutes)) { Start-Refresh }
+  $due = ((Get-Date) - $script:lastTry).TotalMinutes -ge (Get-RefreshMinutes)
+  if (-not $script:job -and ($due -or (Test-ResetPassed))) { Start-Refresh }
   else { Update-All }
 })
 
