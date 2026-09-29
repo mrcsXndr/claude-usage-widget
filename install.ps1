@@ -1,9 +1,10 @@
 <#
   Installs Claude Usage Widget for the current user. No admin rights, no git, no Node.
 
-    irm https://raw.githubusercontent.com/mrcsXndr/claude-usage-widget/main/install.ps1 | iex
+    irm https://github.com/mrcsXndr/claude-usage-widget/releases/latest/download/install.ps1 | iex
 
-  Or download the ZIP, unzip it and double-click Install.cmd. Running it again updates in place.
+  Or download ClaudeUsageWidget.zip from the latest release, unzip it and double-click Install.cmd.
+  Running it again updates in place and keeps your settings.
 #>
 param([switch]$NoStartup, [switch]$NoLaunch)
 
@@ -21,7 +22,7 @@ Write-Host ''
 Write-Host "  $Name" -ForegroundColor White
 Write-Host ''
 
-# Use this folder when run from a checkout or an unzipped download, else fetch the latest code.
+# Use this folder when run from an unzipped release or a checkout, else fetch the latest release.
 $src = $null
 if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'ClaudeUsageWidget.ps1'))) {
   $src = $PSScriptRoot
@@ -31,9 +32,9 @@ if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'ClaudeUsageWidget.ps
   $tmp = Join-Path $env:TEMP ("cuw-" + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory $tmp | Out-Null
   $zip = Join-Path $tmp 'src.zip'
-  Invoke-WebRequest -UseBasicParsing "https://github.com/$Repo/archive/refs/heads/main.zip" -OutFile $zip
-  Expand-Archive $zip $tmp
-  $src = (Get-ChildItem $tmp -Directory | Select-Object -First 1).FullName
+  Invoke-WebRequest -UseBasicParsing "https://github.com/$Repo/releases/latest/download/ClaudeUsageWidget.zip" -OutFile $zip
+  $src = Join-Path $tmp 'src'
+  Expand-Archive $zip $src
 }
 
 # Stop a running copy so its files can be replaced.

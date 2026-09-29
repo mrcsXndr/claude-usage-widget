@@ -7,11 +7,12 @@
 **Your Claude 5-hour, 7-day and Fable limits as small rings on the Windows 11 taskbar.**
 One account or several, updated in the background, in one click.
 
+[![Release](https://img.shields.io/github/v/release/mrcsXndr/claude-usage-widget?color=D97757)](https://github.com/mrcsXndr/claude-usage-widget/releases/latest)
 [![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](#install)
 [![No dependencies](https://img.shields.io/badge/dependencies-none-4CC38A)](#how-it-works)
-[![License: MIT](https://img.shields.io/badge/license-MIT-D97757)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-<img src="docs/screenshot.png" width="474" alt="Usage rings for three accounts on the Windows 11 taskbar, with the account list open above them">
+<img src="docs/widget.png" width="820" alt="Usage rings on the Windows 11 taskbar, with the account list open above them">
 
 </div>
 
@@ -30,7 +31,7 @@ One account or several, updated in the background, in one click.
 Open **PowerShell** (press Start, type `powershell`, press Enter) and paste:
 
 ```powershell
-irm https://raw.githubusercontent.com/mrcsXndr/claude-usage-widget/main/install.ps1 | iex
+irm https://github.com/mrcsXndr/claude-usage-widget/releases/latest/download/install.ps1 | iex
 ```
 
 That's it. The rings appear on your taskbar, left of the clock, and they start with Windows from then on.
@@ -38,10 +39,10 @@ That's it. The rings appear on your taskbar, left of the clock, and they start w
 <details>
 <summary>Prefer not to paste commands?</summary>
 
-1. Click **Code → Download ZIP** at the top of this page and unzip it.
-2. Double-click **`Install.cmd`**.
+1. Download **[ClaudeUsageWidget.zip](https://github.com/mrcsXndr/claude-usage-widget/releases/latest/download/ClaudeUsageWidget.zip)** from the latest release and unzip it.
+2. Double-click **`Install.cmd`**. If Windows asks whether to run it, choose **Run**.
 
-Running either one again updates you to the latest version and keeps your settings.
+Running either one again updates you to the latest release and keeps your settings.
 </details>
 
 **Uninstall:** go to **Settings → Apps → Installed apps → Claude Usage Widget → Uninstall**.
@@ -130,8 +131,9 @@ Hover an account in the list to see which method it used.
 ```powershell
 .\ClaudeUsageWidget.ps1 -Demo          # made-up accounts, no network, your config untouched
 .\ClaudeUsageWidget.ps1 -Once          # every account's usage as JSON, no UI (never includes tokens)
-.\ClaudeUsageWidget.ps1 -Snapshot out  # render the demo UI to PNGs (docs/settings.png)
+.\ClaudeUsageWidget.ps1 -Snapshot docs # re-render the README images (docs/)
 .\tools\Build-Icon.ps1                 # re-render assets\icon.ico
+.\tools\Build-Release.ps1              # build dist\ClaudeUsageWidget.zip for a release
 ```
 
 | File | What it does |
