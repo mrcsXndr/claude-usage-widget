@@ -7,7 +7,7 @@
   Left click   open / close the account list; tick accounts to show them on the taskbar
   Gear         rename accounts, pick each account's rings, rename ring captions
   Ctrl + drag  move the rings along the taskbar
-  Right click  refresh, settings, scan for accounts, start with Windows, exit
+  Right click  refresh, settings, scan for accounts, start with Windows, uninstall, exit
 
   Settings live in %APPDATA%\claude-usage-widget\config.json (created on first run from the
   Claude Code logins and xndr-claude accounts found on this PC).
@@ -805,6 +805,16 @@ $startupItem = New-MenuItem 'Start with Windows' {
 $startupItem.IsCheckable = $true
 [void]$menu.Items.Add($startupItem)
 [void]$menu.Items.Add((New-Object Windows.Controls.Separator))
+$Uninstaller = Join-Path $PSScriptRoot 'uninstall.ps1'
+if (-not $Demo -and (Test-Path $Uninstaller)) {
+  [void]$menu.Items.Add((New-MenuItem "Uninstall$ELL" {
+    $answer = [Windows.MessageBox]::Show($widget,
+      "Remove Claude Usage Widget from this PC?`n`nIts settings are removed too. Your Claude logins aren't touched.",
+      'Uninstall Claude Usage Widget', 'YesNo', 'Question')
+    if ("$answer" -ne 'Yes') { return }
+    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Uninstaller`""
+  }))
+}
 [void]$menu.Items.Add((New-MenuItem 'Exit' { $popup.Close(); $widget.Close() }))
 $menu.Add_Opened({
   $startupItem.IsChecked = Test-Path $StartupLink

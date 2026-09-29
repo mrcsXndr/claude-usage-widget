@@ -45,7 +45,7 @@ That's it. The rings appear on your taskbar, left of the clock, and they start w
 Running either one again updates you to the latest release and keeps your settings.
 </details>
 
-**Uninstall:** go to **Settings → Apps → Installed apps → Claude Usage Widget → Uninstall**.
+**Uninstall** by right-clicking the rings and choosing **Uninstall…**. You can also do it from **Settings → Apps → Installed apps → Claude Usage Widget → Uninstall**. [More options](#uninstall)
 
 ## Use
 
@@ -56,7 +56,7 @@ Running either one again updates you to the latest release and keeps your settin
 | **⚙ Settings** | Rename accounts, choose each one's rings, rename captions |
 | **⟳** | Refresh now (at most once a minute) |
 | **Ctrl + drag** | Move the rings along the taskbar |
-| **Right-click** | Refresh · Settings · Scan for accounts · Start with Windows · Exit |
+| **Right-click** | Refresh · Settings · Scan for accounts · Start with Windows · Uninstall · Exit |
 
 <div align="center">
 <img src="docs/settings.png" width="820" alt="Settings: rename accounts, choose each account's rings, rename ring captions">
@@ -115,6 +115,20 @@ Hover an account in the list to see which method it used.
 - Tokens are kept in memory only as long as one request takes. They're never written to disk, logged, shown, or passed on a command line.
 - The only network calls go to `api.anthropic.com`, plus `github.com` when you install or update.
 - Settings are stored in `%APPDATA%\claude-usage-widget`. Uninstalling removes them. Your Claude logins are never touched.
+
+## Uninstall
+
+Any one of these removes the widget, its shortcuts, its Settings → Apps entry and its settings. Your Claude logins and tokens aren't touched.
+
+- Right-click the rings and choose **Uninstall…**.
+- Go to **Settings → Apps → Installed apps**, find **Claude Usage Widget**, and choose **Uninstall**.
+- Paste this into PowerShell:
+
+  ```powershell
+  & "$env:LOCALAPPDATA\Programs\ClaudeUsageWidget\uninstall.ps1"
+  ```
+
+To keep your settings for a later reinstall, add `-KeepSettings` to that command.
 
 ## Troubleshooting
 
