@@ -1,98 +1,147 @@
-# claude-usage-widget
+<div align="center">
 
-Your Claude 5-hour and 7-day usage as two small rings on the Windows 11 taskbar. Click them for a list of every account you've set up.
+<img src="assets/icon.png" width="84" alt="">
 
-```
-taskbar:   (11) 5h  (30) 7d
+# Claude Usage Widget for Windows 11
 
-click:     Claude usage                       ⟳
-           Updated 11:46 · every 30 min
-           Personal  Max 20x
-             5h ██████████████░░░░  76%   in 3m
-             7d ████████░░░░░░░░░░  43%   Wed 13:00
-           Njord  Max 5x              on taskbar
-             5h ██░░░░░░░░░░░░░░░░  11%   in 4h 42m
-             7d █████░░░░░░░░░░░░░  30%   Mon 00:00
-```
+**Your Claude 5-hour, 7-day and Fable limits as small rings on the Windows 11 taskbar.**
+One account or several, updated in the background, in one click.
 
-- Rings turn green, amber at 70% and red at 90%. Hover them for reset times.
-- The numbers refresh every 30 minutes, when you click ⟳, or from the right-click menu. After the PC wakes from sleep they catch up within a minute.
-- The widget hides while a full-screen app is in front.
-- It's plain PowerShell and WPF, so there's nothing to install or build. It runs on the Windows PowerShell 5.1 that ships with Windows.
+[![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)](#install)
+[![No dependencies](https://img.shields.io/badge/dependencies-none-4CC38A)](#how-it-works)
+[![License: MIT](https://img.shields.io/badge/license-MIT-D97757)](LICENSE)
+
+<img src="docs/widget.png" width="820" alt="Usage rings on the Windows 11 taskbar, with the account list open above them">
+
+</div>
+
+## Features
+
+- **Rings on the taskbar.** Each ring is green up to 70%, amber up to 90% and red after that. Hover a ring for its reset time.
+- **Multiple accounts.** Tick the accounts you want on the taskbar and they sit side by side, each with its name.
+- **All limits in one click.** The list shows each account's 5-hour window, 7-day window and Fable weekly limit, with countdowns to the resets.
+- **Finds your accounts.** On first run it picks up the Claude Code logins on your PC (and [xndr-claude](https://github.com/mrcsXndr/xndr-claude) accounts if you use it).
+- **Settings you can edit.** Rename accounts, choose which rings each one shows, and rename the ring captions.
+- **Stays out of the way.** Refreshes every 30 minutes, and at most once a minute however you trigger it. Catches up after sleep. Hides during full-screen apps. Follows the light or dark theme.
+- **Nothing to install besides itself.** It's plain PowerShell and WPF, which ship with Windows, so there are no runtimes, services or admin rights involved.
 
 ## Install
 
+Open **PowerShell** (press Start, type `powershell`, press Enter) and paste:
+
 ```powershell
-git clone https://github.com/mrcsXndr/claude-usage-widget
-cd claude-usage-widget
-wscript launch.vbs
+irm https://raw.githubusercontent.com/mrcsXndr/claude-usage-widget/main/install.ps1 | iex
 ```
 
-Then right-click the rings and tick **Start with Windows**.
+That's it. The rings appear on your taskbar, left of the clock, and they start with Windows from then on.
 
-Hold **Ctrl** and drag the rings to move them along the taskbar. The position is remembered. The widget is a small always-on-top window that sits on the taskbar, because Windows 11 has no taskbar toolbars or deskbands any more. It works the same with the stock taskbar and with Start11. It uses the primary screen's taskbar, at the bottom or the top.
+<details>
+<summary>Prefer not to paste commands?</summary>
+
+1. Click **Code → Download ZIP** at the top of this page and unzip it.
+2. Double-click **`Install.cmd`**.
+
+Running either one again updates you to the latest version and keeps your settings.
+</details>
+
+**Uninstall:** go to **Settings → Apps → Installed apps → Claude Usage Widget → Uninstall**.
+
+## Use
+
+| | |
+| --- | --- |
+| **Click** the rings | Open the account list |
+| **Tick** an account | Show it on the taskbar |
+| **⚙ Settings** | Rename accounts, choose each one's rings, rename captions |
+| **⟳** | Refresh now (at most once a minute) |
+| **Ctrl + drag** | Move the rings along the taskbar |
+| **Right-click** | Refresh · Settings · Scan for accounts · Start with Windows · Exit |
+
+<div align="center">
+<img src="docs/settings.png" width="820" alt="Settings: rename accounts, choose each account's rings, rename ring captions">
+</div>
 
 ## Accounts
 
-The first run writes `%APPDATA%\claude-usage-widget\config.json`. Right-click the rings and choose **Edit accounts…** to open it. Changes are picked up on the next refresh.
+The widget finds accounts on its own:
+
+- **Claude Code logins.** It reads `%USERPROFILE%\.claude\.credentials.json`, which is where Claude Code keeps its login on Windows. It also checks any other `.claude*` folder in your user profile (for example one per account set up with `CLAUDE_CONFIG_DIR`). Accounts are named after the email they're logged in with.
+- **[xndr-claude](https://github.com/mrcsXndr/xndr-claude)** accounts, if it's installed.
+
+After you log in to another account, right-click the rings and choose **Scan for accounts**. If the same account turns up twice, open ⚙ Settings and untick **In list** on one of them.
+
+<details>
+<summary>Other token sources (config file)</summary>
+
+Everything is stored in `%APPDATA%\claude-usage-widget\config.json`. To open it, right-click the rings and choose **Open config file…**. Each account says where its token comes from:
 
 ```json
 {
   "refreshMinutes": 30,
+  "captions": { "5h": "5h", "7d": "7d", "fable": "Fable" },
   "accounts": [
-    { "name": "personal", "label": "Personal", "plan": "Max 20x", "source": "xndr-claude" },
-    { "name": "claude-code", "label": "Claude Code login", "source": "claude-code" },
-    { "name": "work", "label": "Work", "source": "command", "command": "op read op://Private/claude-work/token" },
-    { "name": "ci", "label": "CI", "source": "env", "env": "CLAUDE_CI_TOKEN" }
+    { "name": "claude-code", "label": "Personal", "source": "claude-code", "taskbar": true, "limits": ["5h", "7d", "fable"] },
+    { "name": "work",  "label": "Work",  "source": "xndr-claude" },
+    { "name": "vault", "label": "Vault", "source": "command", "command": "op read op://Private/claude/token" },
+    { "name": "ci",    "label": "CI",    "source": "env", "env": "CLAUDE_CI_TOKEN", "fable": false }
   ]
 }
 ```
 
-Each account says where its token comes from:
-
-| `source` | Token |
+| `source` | Where the token comes from |
 | --- | --- |
-| `xndr-claude` | `xndr-claude token <name>` from [xndr-claude](https://github.com/mrcsXndr/xndr-claude). Set `"account"` if the name there is different. |
-| `claude-code` | Claude Code's own login in `~/.claude/.credentials.json` (or `%CLAUDE_CONFIG_DIR%`). The widget only reads it and never refreshes it, because a refresh would log Claude Code out. When it expires, running `claude` renews it. |
-| `command` | Whatever the command prints to stdout, for example a password manager CLI. It runs through `cmd /c`. |
+| `claude-code` | Claude Code's login. Add `"dir"` for a config folder other than `~/.claude`. |
+| `xndr-claude` | `xndr-claude token <name>`. Add `"account"` if the name there is different. |
+| `command` | Whatever the command prints, for example a password manager CLI. |
 | `env` | An environment variable. |
 
-If [xndr-claude](https://github.com/mrcsXndr/xndr-claude) is installed, the first run imports its accounts. That runs `xndr-claude usage --json` once, which sends one probe per account (see below). A Claude Code login is also added when it's current, or when nothing else was found.
+`"fable": false` makes that account skip the Fable probe (see below).
+</details>
 
-The account on the taskbar is the one you last clicked in the list. Until you click one, it's the account xndr-claude last launched, or the first account. Right-click the rings and choose **Show last-used account** to go back to that default.
+## How it works
 
-## How usage is read
+For each account the widget asks Anthropic for the current limits. There are two ways to do that, and it tries the free one first:
 
-There are two ways, and each account tries the free one first:
+1. **Usage API (free).** `GET api.anthropic.com/api/oauth/usage` returns every limit and doesn't use any of your allowance. This works for **Claude Code logins**.
+2. **Probe (tiny).** Tokens made with `claude setup-token` aren't allowed to call the usage API ([anthropics/claude-code#81015](https://github.com/anthropics/claude-code/issues/81015)). For those, the widget sends a 1-token request and reads the limits from the rate-limit headers on the reply. It sends that request to Fable, because only then does the reply include the Fable weekly limit. That costs about 35 tokens per account per refresh. If Fable isn't available on an account, it uses Haiku instead.
 
-1. **Usage API (free).** `GET https://api.anthropic.com/api/oauth/usage` returns `five_hour` and `seven_day` utilization and reset times. It needs a token with the `user:profile` scope, which is what `claude login` gives Claude Code.
-2. **Probe (a few tokens).** A request to Haiku with `max_tokens: 1`. The reply carries the same numbers in its `anthropic-ratelimit-unified-5h-*` / `-7d-*` headers, even when the reply is a 429. Tokens from `claude setup-token` are inference-only and get a 403 from the usage API ([anthropics/claude-code#81015](https://github.com/anthropics/claude-code/issues/81015), closed as not planned), so the probe is the only way to read them. It costs about a dozen input tokens and one output token per account per refresh.
+Hover an account in the list to see which method it used.
 
-When the usage API answers with a scope error, that account uses the probe for the rest of the session. If the usage API returns a 429 (it rate-limits hard), that one refresh uses the probe instead. Hover an account in the list to see which method it used.
+**Claude Code logins expire.** The widget only ever reads the login and never renews it, because renewing would sign Claude Code out. If a login has expired, open Claude Code once and the widget picks up the new one.
 
 ## Privacy
 
-- Tokens stay in memory only for the one request. They're never written to disk, logged, shown or passed as a command-line argument. A failing token command reports its stderr only, never its stdout.
-- Requests go only to `api.anthropic.com`.
-- `-Once` prints usage as JSON with no UI, which is useful for scripts and debugging. The output never includes tokens:
+- Tokens are kept in memory only as long as one request takes. They're never written to disk, logged, shown, or passed on a command line.
+- The only network calls go to `api.anthropic.com`, plus `github.com` when you install or update.
+- Settings are stored in `%APPDATA%\claude-usage-widget`. Uninstalling removes them. Your Claude logins are never touched.
 
-  ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File .\ClaudeUsageWidget.ps1 -Once
-  ```
+## Troubleshooting
 
-## Files
-
-| Path | What |
+| | |
 | --- | --- |
-| `ClaudeUsageWidget.ps1` | The widget (WPF) |
-| `lib/Usage.ps1` | Config, token sources and the usage API / probe calls, with no UI |
-| `launch.vbs` | Starts the widget without a console window. **Start with Windows** points at it. |
-| `%APPDATA%\claude-usage-widget\` | `config.json` (accounts), `state.json` (position and pinned account), `widget.log` (errors) |
+| **Rings don't appear** | Run the installer again. Errors are logged to `%APPDATA%\claude-usage-widget\widget.log`. |
+| **"Login expired"** | Open Claude Code once so it renews the login. |
+| **"token invalid"** | That token was revoked. Log in again, or make a new setup-token. |
+| **Rings cover a tray icon** | Hold Ctrl and drag them somewhere else. |
+| **Taskbar on another screen** | For now the widget sits on the main screen's taskbar only. |
 
-## Uninstall
+## For developers
 
-Right-click the rings, untick **Start with Windows**, then choose **Exit**. Delete the folder and `%APPDATA%\claude-usage-widget`.
+```powershell
+.\ClaudeUsageWidget.ps1 -Demo          # made-up accounts, no network, your config untouched
+.\ClaudeUsageWidget.ps1 -Once          # every account's usage as JSON, no UI (never includes tokens)
+.\ClaudeUsageWidget.ps1 -Snapshot docs # re-render the README screenshots
+.\tools\Build-Icon.ps1                 # re-render assets\icon.ico
+```
+
+| File | What it does |
+| --- | --- |
+| `ClaudeUsageWidget.ps1` | The widget: taskbar rings, account list, settings (WPF) |
+| `lib/Usage.ps1` | Account discovery, token sources, usage API and probe, with no UI |
+| `install.ps1` / `Install.cmd` / `uninstall.ps1` | Per-user install to `%LOCALAPPDATA%\Programs`, with Start menu, startup and Settings → Apps entries |
+
+The code is kept ASCII-only so the Windows PowerShell 5.1 that ships with Windows reads it correctly. Pull requests are welcome.
 
 ## License
 
-MIT
+[MIT](LICENSE). This project isn't affiliated with Anthropic.

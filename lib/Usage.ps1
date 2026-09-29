@@ -4,8 +4,10 @@
 # Two ways to read an account's 5h / 7d usage:
 #   usage-api  GET /api/oauth/usage. Free, but needs a token with the user:profile
 #              scope (a `claude login` token). Setup-tokens get a 403.
-#   probe      A 1-token Haiku request; the unified rate-limit headers on the reply
-#              carry the same numbers. Works for any token and costs a handful of tokens.
+#   probe      A 1-token request; the unified rate-limit headers on the reply carry
+#              the same numbers. Works for any token and costs a few dozen tokens.
+#              Sent to Fable it also returns the Fable weekly limit (header 7d_oi);
+#              when Fable isn't usable for the account it falls back to Haiku.
 # Each account tries the usage API first; a scope 403 switches it to the probe for
 # the rest of the session.
 
@@ -17,7 +19,13 @@ $LogPath    = Join-Path $AppDir 'widget.log'
 $UsageUrl   = 'https://api.anthropic.com/api/oauth/usage'
 $ProbeUrl   = 'https://api.anthropic.com/v1/messages'
 $ProbeModel = 'claude-haiku-4-5-20251001'
-$UserAgent  = 'claude-usage-widget/1.0 (+https://github.com/mrcsXndr/claude-usage-widget)'
+$FableModel = 'claude-fable-5-1'
+# OAuth tokens only reach models other than Haiku with Claude Code's system prompt.
+$ClaudeCodeSystem = "You are Claude Code, Anthropic's official CLI for Claude."
+$LimitKeys  = @('5h', '7d', 'fable')
+$DefaultCaptions = [ordered]@{ '5h' = '5h'; '7d' = '7d'; 'fable' = 'Fable' }
+$AppVersion = '1.1.0'
+$UserAgent  = "claude-usage-widget/$AppVersion (+https://github.com/mrcsXndr/claude-usage-widget)"
 
 function Write-Log([string]$msg) {
   try {
@@ -63,60 +71,124 @@ function Invoke-Captured([string]$commandLine, [int]$timeoutSec = 30) {
   }
 }
 
+# Shortcut that starts the widget with no console window (conhost --headless, no VBScript needed).
+function New-LauncherShortcut([string]$path, [string]$appDir) {
+  $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
+  $sc.TargetPath = Join-Path $env:WINDIR 'System32\conhost.exe'
+  $sc.Arguments = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$(Join-Path $appDir 'ClaudeUsageWidget.ps1')`""
+  $sc.WorkingDirectory = $appDir
+  $icon = Join-Path $appDir 'assets\icon.ico'
+  if (Test-Path $icon) { $sc.IconLocation = "$icon,0" }
+  $sc.Description = 'Claude usage on your taskbar'
+  $sc.Save()
+}
+
 function Get-LastLine([string]$text) {
   ($text -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
 }
 
-# ---------------------------------------------------------------- config
+# ---------------------------------------------------------------- discovery & config
 
-# Claude Code's own login (~/.claude/.credentials.json). Read-only: we never refresh it,
-# because refreshing rotates the refresh token and would log Claude Code out.
-function Get-ClaudeCodeLogin {
-  $path = Join-Path (Get-ClaudeConfigDir) '.credentials.json'
-  if (-not (Test-Path $path)) { return $null }
-  try { $o = (Get-Content $path -Raw | ConvertFrom-Json).claudeAiOauth } catch { return $null }
-  if (-not $o -or -not $o.accessToken) { return $null }
-  $expires = if ($o.expiresAt) { [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$o.expiresAt).UtcDateTime } else { $null }
-  return [pscustomobject]@{ token = $o.accessToken; expires = $expires; plan = $o.subscriptionType }
+function Format-Plan($tier, $sub) {
+  if ("$tier" -match 'max_(\d+x)') { return "Max $($Matches[1])" }
+  if ($sub) { return (Get-Culture).TextInfo.ToTitleCase("$sub") }
+  return $null
 }
 
-# One-time import of xndr-claude's accounts. `usage --json` is its only machine-readable
-# listing, so this costs one probe per account, once.
+# Claude Code's login in <dir>\.credentials.json (dir defaults to ~/.claude). Read-only: we never
+# refresh it, because refreshing rotates the refresh token and would log Claude Code out.
+function Get-ClaudeCodeLogin([string]$dir) {
+  if (-not $dir) { $dir = Get-ClaudeConfigDir }
+  $path = Join-Path $dir '.credentials.json'
+  if (-not (Test-Path -LiteralPath $path)) { return $null }
+  try { $o = (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json).claudeAiOauth } catch { return $null }
+  if (-not $o -or -not $o.accessToken) { return $null }
+  $expires = if ($o.expiresAt) { [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$o.expiresAt).UtcDateTime } else { $null }
+  return [pscustomobject]@{ token = $o.accessToken; expires = $expires; plan = (Format-Plan $o.rateLimitTier $o.subscriptionType) }
+}
+
+# Who a config dir is logged in as: .claude.json sits beside ~/.claude, or inside a custom dir.
+function Get-ClaudeCodeIdentity([string]$dir) {
+  foreach ($p in @(($dir.TrimEnd('\', '/') + '.json'), (Join-Path $dir '.claude.json'))) {
+    if (Test-Path -LiteralPath $p) {
+      try { $o = (Get-Content -LiteralPath $p -Raw | ConvertFrom-Json).oauthAccount; if ($o) { return $o } } catch {}
+    }
+  }
+  return $null
+}
+
+# Every Claude Code login on this PC: ~/.claude, other ~/.claude* dirs (a common way to keep
+# one login per account via CLAUDE_CONFIG_DIR), and CLAUDE_CONFIG_DIR itself.
+function Find-ClaudeCodeLogins {
+  $default = [IO.Path]::GetFullPath((Join-Path $HOME '.claude')).TrimEnd('\')
+  $dirs = @()
+  if ($env:CLAUDE_CONFIG_DIR) { $dirs += $env:CLAUDE_CONFIG_DIR }
+  $dirs += @(Get-ChildItem -LiteralPath $HOME -Directory -Force -Filter '.claude*' -ErrorAction SilentlyContinue | ForEach-Object FullName)
+  $seen = @{}
+  foreach ($d in $dirs) {
+    $full = [IO.Path]::GetFullPath($d).TrimEnd('\')
+    if ($seen[$full.ToLower()]) { continue }
+    $seen[$full.ToLower()] = $true
+    $login = Get-ClaudeCodeLogin $full
+    if (-not $login) { continue }
+    $id = Get-ClaudeCodeIdentity $full
+    if ($id.accountUuid) { if ($seen[$id.accountUuid]) { continue }; $seen[$id.accountUuid] = $true }
+    $leaf = Split-Path $full -Leaf
+    $acct = [ordered]@{
+      name   = $(if ($full -eq $default) { 'claude-code' } else { 'claude-code-' + ($leaf -replace '^\.claude[-_.]?', '') })
+      label  = $(if ($id.emailAddress) { $id.emailAddress } else { 'Claude Code' })
+      plan   = $login.plan
+      source = 'claude-code'
+    }
+    if ($full -ne $default) { $acct.dir = $full }
+    $acct
+  }
+}
+
+# xndr-claude's accounts, if it's installed. `usage --json` is its only machine-readable
+# listing, so this costs one probe per account.
 function Import-XndrClaudeAccounts {
-  if (-not (Test-Command 'xndr-claude')) { return @() }
+  if (-not (Test-Command 'xndr-claude')) { return }
   try {
     $r = Invoke-Captured 'xndr-claude usage --json' 60
     if ($r.exit -ne 0) { throw (Get-LastLine $r.err) }
-    $list = @()
     foreach ($a in (ConvertFrom-Json $r.out)) {
-      $list += [ordered]@{ name = $a.name; label = $a.label; plan = $a.plan; source = 'xndr-claude' }
+      [ordered]@{ name = $a.name; label = $a.label; plan = $a.plan; source = 'xndr-claude' }
     }
-    return $list
   } catch {
     Write-Log "xndr-claude import failed: $_"
-    return @()
   }
 }
 
-function New-DefaultConfig {
-  $accounts = @(Import-XndrClaudeAccounts)
-  $login = Get-ClaudeCodeLogin
-  if ($login -and (-not $accounts.Count -or ($login.expires -and $login.expires -gt [DateTime]::UtcNow))) {
-    $plan = if ($login.plan) { (Get-Culture).TextInfo.ToTitleCase($login.plan) } else { $null }
-    $accounts += [ordered]@{ name = 'claude-code'; label = 'Claude Code login'; plan = $plan; source = 'claude-code' }
+# Adds accounts found on this PC that the config doesn't have yet; returns how many were added.
+function Add-DiscoveredAccounts($cfg) {
+  $added = 0
+  foreach ($a in @(@(Find-ClaudeCodeLogins) + @(Import-XndrClaudeAccounts))) {
+    $known = @($cfg.accounts | Where-Object {
+      $_.name -eq $a.name -or ($_.source -eq 'claude-code' -and $a.source -eq 'claude-code' -and "$($_.dir)" -eq "$($a.dir)")
+    })
+    if ($known.Count) { continue }
+    $cfg.accounts = @($cfg.accounts) + @([pscustomobject]$a)
+    $added++
   }
-  return [ordered]@{ refreshMinutes = 30; accounts = $accounts }
+  return $added
 }
 
-# Reads config.json, creating it on first run.
+function Save-Config($cfg) {
+  New-Item -ItemType Directory -Force $AppDir | Out-Null
+  $cfg | ConvertTo-Json -Depth 6 | Set-Content $ConfigPath -Encoding UTF8
+}
+
+# Reads config.json. The first run creates it from whatever accounts are found on this PC.
 function Read-Config {
   if (-not (Test-Path $ConfigPath)) {
-    New-Item -ItemType Directory -Force $AppDir | Out-Null
-    $cfg = New-DefaultConfig
-    $cfg | ConvertTo-Json -Depth 5 | Set-Content $ConfigPath -Encoding UTF8
+    $cfg = [pscustomobject]@{ refreshMinutes = 30; captions = [pscustomobject]$DefaultCaptions; accounts = @() }
+    [void](Add-DiscoveredAccounts $cfg)
+    Save-Config $cfg
   }
   $cfg = Get-Content $ConfigPath -Raw | ConvertFrom-Json
   if (-not $cfg.refreshMinutes) { $cfg | Add-Member -Force refreshMinutes 30 }
+  if (-not $cfg.captions) { $cfg | Add-Member -Force captions ([pscustomobject]$DefaultCaptions) }
   if (-not $cfg.accounts) { $cfg | Add-Member -Force accounts @() }
   return $cfg
 }
@@ -126,9 +198,9 @@ function Read-Config {
 function Get-AccountToken($acct) {
   switch ($acct.source) {
     'claude-code' {
-      $login = Get-ClaudeCodeLogin
-      if (-not $login) { throw 'no Claude Code login found' }
-      if ($login.expires -and $login.expires -le [DateTime]::UtcNow) { throw 'Claude Code login expired; run claude to refresh it' }
+      $login = Get-ClaudeCodeLogin $acct.dir
+      if (-not $login) { throw 'Claude Code login not found' }
+      if ($login.expires -and $login.expires -le [DateTime]::UtcNow) { throw 'login expired: open Claude Code to renew it' }
       return $login.token
     }
     'xndr-claude' {
@@ -203,7 +275,15 @@ function Read-UsageApi($client, [string]$token) {
         $reset = if ($w.resets_at -is [DateTime]) { $w.resets_at.ToUniversalTime().ToString('o') } else { $w.resets_at }
         New-Window ([double]$w.utilization) $reset
       }
-      return [pscustomobject]@{ http = 200; five_h = (& $win $j.five_hour); seven_d = (& $win $j.seven_day) }
+      # Per-model weekly limits come as limits[] entries of kind weekly_scoped.
+      $fable = if ($j.seven_day_fable) { & $win $j.seven_day_fable } else { New-Window $null $null }
+      foreach ($l in @($j.limits)) {
+        if ($l.kind -eq 'weekly_scoped' -and "$($l.scope.model.display_name)" -match 'fable') {
+          $reset = if ($l.resets_at -is [DateTime]) { $l.resets_at.ToUniversalTime().ToString('o') } else { $l.resets_at }
+          $fable = New-Window ([double]$l.percent) $reset
+        }
+      }
+      return [pscustomobject]@{ http = 200; five_h = (& $win $j.five_hour); seven_d = (& $win $j.seven_day); fable = $fable }
     }
     if ($code -eq 403 -and $text -match 'oauth_scope_insufficient|scope requirement') { return [pscustomobject]@{ noScope = $true } }
     if ($code -eq 401) { return [pscustomobject]@{ http = 401; invalid = $true } }
@@ -211,9 +291,11 @@ function Read-UsageApi($client, [string]$token) {
   } finally { $res.Dispose() }
 }
 
-# 1-token Haiku request; the numbers ride on the response headers (also on a 429).
-function Read-Probe($client, [string]$token) {
-  $body = '{"model":"' + $ProbeModel + '","max_tokens":1,"messages":[{"role":"user","content":"."}]}'
+# 1-token request; the numbers ride on the response headers (also on a 429).
+function Read-Probe($client, [string]$token, [string]$model = $ProbeModel) {
+  $req = [ordered]@{ model = $model; max_tokens = 1; messages = @(@{ role = 'user'; content = '.' }) }
+  if ($model -ne $ProbeModel) { $req.system = $ClaudeCodeSystem }
+  $body = $req | ConvertTo-Json -Depth 4 -Compress
   $res = Send-Request $client 'POST' $ProbeUrl $token $body
   try {
     $code = [int]$res.StatusCode
@@ -231,9 +313,9 @@ function Read-Probe($client, [string]$token) {
       $reset = if ($r) { [DateTimeOffset]::FromUnixTimeSeconds([int64]$r).UtcDateTime.ToString('o') } else { $null }
       New-Window $pct $reset
     }
-    $five = & $win '5h'; $seven = & $win '7d'
+    $five = & $win '5h'; $seven = & $win '7d'; $fable = & $win '7d_oi'
     if ($null -eq $five.pct -and $null -eq $seven.pct) { return [pscustomobject]@{ http = $code; error = "http $code, no usage headers" } }
-    return [pscustomobject]@{ http = $code; five_h = $five; seven_d = $seven }
+    return [pscustomobject]@{ http = $code; five_h = $five; seven_d = $seven; fable = $fable; limited = ((& $h 'status') -eq 'rejected') }
   } finally { $res.Dispose() }
 }
 
@@ -247,7 +329,7 @@ function Get-AllUsage($Config, [hashtable]$MethodCache = @{}) {
       $row = [ordered]@{
         name = $a.name; label = $(if ($a.label) { $a.label } else { $a.name }); plan = $a.plan
         status = 'error'; error = $null; method = $null
-        five_h = (New-Window $null $null); seven_d = (New-Window $null $null)
+        five_h = (New-Window $null $null); seven_d = (New-Window $null $null); fable = (New-Window $null $null)
       }
       try {
         $token = Get-AccountToken $a
@@ -258,15 +340,27 @@ function Get-AllUsage($Config, [hashtable]$MethodCache = @{}) {
           elseif ($r.retry) { $r = $null }
           else { $row.method = 'usage-api' }
         }
-        if (-not $r) { $r = Read-Probe $client $token; $row.method = 'probe' }
+        if (-not $r) {
+          $row.method = 'probe'
+          # Probe Fable (to get its weekly limit too) unless the account opts out or Fable didn't work for it.
+          $fableKey = "$($a.name):fable"
+          if ($a.fable -ne $false -and $MethodCache[$fableKey] -ne 'off') {
+            $r = Read-Probe $client $token $FableModel
+            if ($r.error) { $MethodCache[$fableKey] = 'off'; $r = $null }
+            elseif (-not $r.invalid -and $null -eq $r.fable.pct) { $MethodCache[$fableKey] = 'off' }
+          }
+          if (-not $r) { $r = Read-Probe $client $token $ProbeModel }
+        }
         if ($r.invalid) { $row.status = 'invalid'; $row.error = "token invalid (http $($r.http))" }
         elseif ($r.error) { $row.error = $r.error }
         else {
           $row.five_h = $r.five_h; $row.seven_d = $r.seven_d
-          $row.status = if ($r.http -eq 429) { 'limited' } else { 'ok' }
+          if ($r.fable) { $row.fable = $r.fable }
+          $row.status = if ($r.limited -or $r.five_h.pct -ge 100 -or $r.seven_d.pct -ge 100) { 'limited' } else { 'ok' }
         }
       } catch {
         $row.error = "$_"
+        if ($row.error -like 'login expired*') { $row.status = 'expired' }
       } finally {
         $token = $null
       }
