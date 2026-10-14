@@ -3,6 +3,25 @@
 All notable changes to Claude Usage Widget. Versions follow [semantic versioning](https://semver.org/).
 Each version is a [GitHub release](https://github.com/mrcsXndr/claude-usage-widget/releases) with an installer.
 
+## [1.9.2] - 2026-10-15
+
+### Fixed
+- **"Update now" did nothing visible and the widget disappeared.** The old flow started a second PowerShell that stopped the widget, then relied on the shell opening a shortcut to start the new one, with nothing to say whether it had. A new widget that started while the old one was still shutting down also quit at once. Now the Updates tab shows each step (checking, downloading with a progress bar, installing, errors, "Updated to vX"), and a separate relauncher (`lib\Updater.ps1`) waits for the old process to exit, backs up the files, replaces them, starts the new widget and checks that it is running. If the new version will not start it puts the old one back and starts that. Every step is written to `%APPDATA%\claude-usage-widget\update.log`. The popup's "Update now" opens Settings on the Updates tab, so the update always runs where you can see it.
+- `tools\Test-Update.ps1`: a headless test of the relaunch (old widget running, hand-over, new widget running from the install folder; a broken zip is rolled back and a widget is still running). It redirects every folder it touches to a scratch directory.
+
+### Added (Settings > Display)
+- **Spacing**: Tight, Normal or Wide, for the gap between accounts and between an account's rings. Works in every size, dividers stay optional.
+- **Account name**: Left, Right or Hidden (replaces the on/off checkbox).
+- **Next to the ring** also offers **Reset in** ("in 3h 05m") and **Reset day + time** ("Sat 03:02").
+- **Inner ring**: choose whether 5h or 7d is the inner ring of combined dials (default 5h inside, as before). An account can still override it.
+- **Reset time with combined dials**: Normal and Large show it on each limit's line; Compact shows it on hover.
+- **Hover a ring** for what it is: account, 5h or 7d, percentage and when it resets.
+- **Hide an account while it's at its limit** (off by default): the account leaves the taskbar until its window resets and stays in the list. If every account is at its limit they all stay.
+- **Show the legend** in the account list is now an option (off by default).
+
+### Changed
+- **Settings > Accounts**: a visible row of account buttons picks the account; its details are always open (the small expand arrow is gone). "On taskbar" lives only here; the pop-up list just displays.
+
 ## [1.9.1] - 2026-10-15
 
 ### Changed

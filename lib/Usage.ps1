@@ -25,10 +25,10 @@ $FableModel = 'claude-fable-5-1'
 $ClaudeCodeSystem = "You are Claude Code, Anthropic's official CLI for Claude."
 $LimitKeys  = @('5h', '7d', 'fable')
 $DefaultCaptions = [ordered]@{ '5h' = '5h'; '7d' = '7d'; 'fable' = 'Fable' }
-$AppVersion = '1.9.1'
-# Self-update: the latest-release API and the one installer URL "Update now" may run.
+$AppVersion = '1.9.2'
+# Self-update: the latest-release API, and the one zip "Update now" may download (the same asset install.ps1 uses).
 $ReleaseApiUrl = 'https://api.github.com/repos/mrcsXndr/claude-usage-widget/releases/latest'
-$InstallerUrl  = 'https://github.com/mrcsXndr/claude-usage-widget/releases/latest/download/install.ps1'
+$UpdateZipUrl  = 'https://github.com/mrcsXndr/claude-usage-widget/releases/latest/download/ClaudeUsageWidget.zip'
 # Plans the settings picker offers; an empty plan means Auto (whatever the API reports).
 $PlanChoices = @('Pro', 'Max 5x', 'Max 20x')
 $UserAgent  = "claude-usage-widget/$AppVersion (+https://github.com/mrcsXndr/claude-usage-widget)"
@@ -363,6 +363,60 @@ function Get-LatestRelease {
 function Test-NewerVersion([string]$candidate, [string]$current) {
   $a = ConvertTo-Version $candidate; $b = ConvertTo-Version $current
   return [bool]($a -and $b -and $a -gt $b)
+}
+
+# Downloads the release zip to $out (only ever the fixed GitHub URL), publishing progress in the synchronized
+# hashtable $sync (pct 0-100, bytes). Returns the version found inside the zip; throws on any problem.
+function Save-UpdateZip([string]$url, [string]$out, $sync) {
+  if ($url -ne $UpdateZipUrl -and -not $env:CUW_TEST_UPDATE_URL) { throw 'refusing to download from an unexpected URL' }
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $c = New-HttpClient
+  try {
+    $c.Timeout = [TimeSpan]::FromMinutes(5)
+    $res = $c.GetAsync($url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+    try {
+      if ([int]$res.StatusCode -ne 200) { throw "GitHub answered $([int]$res.StatusCode)" }
+      $total = $res.Content.Headers.ContentLength
+      $in = $res.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+      $fs = [IO.File]::Create($out)
+      try {
+        $buf = New-Object byte[] 65536; $done = 0
+        while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+          $fs.Write($buf, 0, $n); $done += $n
+          $sync.bytes = $done
+          if ($total) { $sync.pct = [int][Math]::Min(100, 100 * $done / $total) }
+        }
+      } finally { $fs.Close(); $in.Dispose() }
+    } finally { $res.Dispose() }
+  } finally { $c.Dispose() }
+  return (Get-ZipVersion $out)
+}
+
+# The widget version inside a release zip (lib/Usage.ps1's $AppVersion). Throws when the zip is not a release.
+function Get-ZipVersion([string]$zip) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $z = [IO.Compression.ZipFile]::OpenRead($zip)
+  try {
+    $names = @($z.Entries | ForEach-Object { $_.FullName })
+    foreach ($need in 'ClaudeUsageWidget.ps1', 'lib/Usage.ps1') { if ($names -notcontains $need) { throw "the download is not a widget release (no $need)" } }
+    $e = $z.GetEntry('lib/Usage.ps1')
+    $r = New-Object IO.StreamReader($e.Open())
+    try { $text = $r.ReadToEnd() } finally { $r.Dispose() }
+    if ($text -notmatch "\`$AppVersion\s*=\s*'(\d+\.\d+\.\d+)'") { throw 'the download has no version' }
+    return $Matches[1]
+  } finally { $z.Dispose() }
+}
+
+# Hands the update to a separate process (a copy of lib\Updater.ps1 in TEMP, so replacing the install folder cannot
+# disturb it). It waits for the widget (-WidgetPid) to exit, replaces the files in $dest from $zip, starts the new widget
+# and checks that it is running; everything goes to update.log. Returns the helper's process.
+function Start-UpdateHelper([int]$widgetPid, [string]$zip, [string]$dest) {
+  $src = Join-Path $PSScriptRoot 'Updater.ps1'
+  $tmp = Join-Path $env:TEMP ("cuw-updater-" + [guid]::NewGuid().ToString('N') + '.ps1')
+  Copy-Item $src $tmp -Force
+  $args2 = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$tmp`" -WidgetPid $widgetPid -Zip `"$zip`" -Dest `"$dest`" -LogDir `"$AppDir`""
+  Write-Log "update: starting helper (widget pid $widgetPid, zip $zip, dest $dest)"
+  return (Start-Process powershell.exe -WindowStyle Hidden -ArgumentList $args2 -PassThru)
 }
 
 # First few lines of release notes, markdown marks stripped, for the update pill.
