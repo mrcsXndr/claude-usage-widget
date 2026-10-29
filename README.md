@@ -7,6 +7,8 @@
 **Your Claude 5-hour, 7-day and Fable limits as small rings on the Windows 11 taskbar.**
 One account or several, updated in the background, in one click.
 
+> **On a Mac?** See [macos/](macos/README.md) for the menu bar version.
+
 **Install:** paste in PowerShell
 
 ```powershell
