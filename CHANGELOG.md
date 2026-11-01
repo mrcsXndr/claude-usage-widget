@@ -3,6 +3,14 @@
 All notable changes to Claude Usage Widget. Versions follow [semantic versioning](https://semver.org/).
 Each version is a [GitHub release](https://github.com/mrcsXndr/claude-usage-widget/releases) with an installer.
 
+## [1.9.3] - 2026-11-01
+
+### Fixed
+- **Accounts with no 5h window (Anthropic's Ultra plan) no longer show an empty 5h ring.** The 5h window is now data-driven: when the usage API's `five_hour` is null, or the probe reply has no `anthropic-ratelimit-unified-5h-*` headers, that account's 5h ring, caption, hover line and list bar are left out (taskbar rings, list, legend). A combined dial for such an account becomes a plain 7d ring (plus Fable if ticked). An account whose read failed is not treated as having no 5h window.
+
+### Added
+- **Ultra** in the plan label (read from the API when it says so) and in the Settings plan picker.
+
 ## [1.9.2] - 2026-10-15
 
 ### Fixed
