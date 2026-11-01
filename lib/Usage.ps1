@@ -25,12 +25,12 @@ $FableModel = 'claude-fable-5-1'
 $ClaudeCodeSystem = "You are Claude Code, Anthropic's official CLI for Claude."
 $LimitKeys  = @('5h', '7d', 'fable')
 $DefaultCaptions = [ordered]@{ '5h' = '5h'; '7d' = '7d'; 'fable' = 'Fable' }
-$AppVersion = '1.9.2'
+$AppVersion = '1.9.3'
 # Self-update: the latest-release API, and the one zip "Update now" may download (the same asset install.ps1 uses).
 $ReleaseApiUrl = 'https://api.github.com/repos/mrcsXndr/claude-usage-widget/releases/latest'
 $UpdateZipUrl  = 'https://github.com/mrcsXndr/claude-usage-widget/releases/latest/download/ClaudeUsageWidget.zip'
 # Plans the settings picker offers; an empty plan means Auto (whatever the API reports).
-$PlanChoices = @('Pro', 'Max 5x', 'Max 20x')
+$PlanChoices = @('Pro', 'Max 5x', 'Max 20x', 'Ultra')
 $UserAgent  = "claude-usage-widget/$AppVersion (+https://github.com/mrcsXndr/claude-usage-widget)"
 
 function Write-Log([string]$msg) {
@@ -121,6 +121,7 @@ function Get-LastLine([string]$text) {
 
 function Format-Plan($tier, $sub) {
   if ("$tier" -match 'max_(\d+x)') { return "Max $($Matches[1])" }
+  if ("$tier $sub" -match 'ultra') { return 'Ultra' }
   if ($sub) { return (Get-Culture).TextInfo.ToTitleCase(("$sub" -replace '^claude_', '')) }
   return $null
 }

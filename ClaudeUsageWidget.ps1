@@ -191,6 +191,21 @@ function Get-TaskbarLimits($cfg) {
   return @('5h', '7d')
 }
 
+# Plans without a 5-hour window (Ultra) report none: the usage API's five_hour is null, or the probe has no
+# anthropic-ratelimit-unified-5h-* headers. Only a read that worked counts, so an error or "loading" is not "no 5h".
+function Test-NoFiveH($res) {
+  if (-not $res -or $res.status -notin 'ok', 'limited') { return $false }
+  $w = $res.five_h
+  return (-not $w -or $null -eq $w.pct)
+}
+
+# The limits an account really shows: its taskbar choice minus 5h when it has none (never empty: 7d then).
+function Get-ShownLimits($cfg, $res) {
+  $l = @(Get-TaskbarLimits $cfg)
+  if (Test-NoFiveH $res) { $l = @($l | Where-Object { $_ -ne '5h' }); if (-not $l.Count) { $l = @('7d') } }
+  return $l
+}
+
 function Get-LastUsed {
   try { return (Get-Content (Join-Path (Get-XndrClaudeHome) 'state.json') -Raw | ConvertFrom-Json).last } catch { return $null }
 }
@@ -341,12 +356,14 @@ function Set-DemoData {
       [pscustomobject]@{ name = 'personal'; label = 'Personal'; plan = 'Max 20x'; source = 'claude-code'; taskbar = $true; limits = @('5h', '7d', 'fable') }
       [pscustomobject]@{ name = 'work'; label = 'Work'; plan = 'Max 5x'; source = 'xndr-claude'; taskbar = $true; style = 'combined'; pie = '5h' }
       [pscustomobject]@{ name = 'side'; label = 'Side project'; plan = 'Pro'; source = 'env' }
+      [pscustomobject]@{ name = 'ultra'; label = 'Ultra'; plan = 'Ultra'; source = 'env' }
     )
   }
   $script:accounts = @(
     [pscustomobject]@{ name = 'personal'; status = 'ok'; error = $null; method = 'usage-api'; apiPlan = 'Max 20x'; five_h = (& $w 64 72); seven_d = (& $w 43 1574); fable = (& $w 38 1574) }
     [pscustomobject]@{ name = 'work'; status = 'ok'; error = $null; method = 'probe'; five_h = (& $w 12 282); seven_d = (& $w 30 6060); fable = (& $w 56 6060) }
     [pscustomobject]@{ name = 'side'; status = 'limited'; error = $null; method = 'probe'; five_h = (& $w 100 38); seven_d = (& $w 71 2900); fable = (& $w $null $null) }
+    [pscustomobject]@{ name = 'ultra'; status = 'ok'; error = $null; method = 'probe'; five_h = (& $w $null $null); seven_d = (& $w 58 3000); fable = (& $w 12 3000) }
   )
   $script:updated = (Get-Date).Date.AddHours(11).AddMinutes(46)
 }
@@ -851,12 +868,12 @@ function Get-AccountTip($cfg, $res) {
     $tip += (Get-Label $cfg) + $(if ($short) { " ($short)" }) + $(if ($plan) { " $DOT $plan" })
     # Where each limit sits on the taskbar, so the bar itself needs no captions.
     $places = @{}
-    if ($cfg.style -eq 'combined') {
+    if ($cfg.style -eq 'combined' -and -not (Test-NoFiveH $res)) {
       $pieKey = Get-PieKey $cfg
       $places[$pieKey] = if ((Get-InsideMode) -ne 'percent') { 'inner ring' } else { 'middle' }
       $places[$(if ($pieKey -eq '5h') { '7d' } else { '5h' })] = 'outer ring'
     } else {
-      $keys = @(Get-TaskbarLimits $cfg)
+      $keys = @(Get-ShownLimits $cfg $res)
       if ($keys.Count -gt 1) { for ($i = 0; $i -lt $keys.Count; $i++) { $places[$keys[$i]] = if ($i -eq 0) { 'left ring' } elseif ($i -eq $keys.Count - 1) { 'right ring' } else { 'middle ring' } } }
     }
     foreach ($k in $LimitKeys) {
@@ -888,6 +905,7 @@ function Get-WidgetSig($cfgs) {
   $parts = @(($script:config | ConvertTo-Json -Depth 6 -Compress), "$dpi", "$([bool]$script:job)", "$($widget.IsLoaded)", "$(@($script:newAccts | ForEach-Object name) -join ',')", (Get-Shorts | ConvertTo-Json -Compress), "shown:$(@($cfgs | ForEach-Object name) -join ',')")
   foreach ($cfg in $cfgs) {
     $res = Get-Result $cfg.name
+    $parts += "no5h:$(Test-NoFiveH $res)"
     $parts += ($LimitKeys | ForEach-Object { "$((Get-Win $res $_).pct)" }) -join '/'
     if ($script:TwoRows -or $script:ShowReset -or (Get-NextMode) -in 'resetin', 'resetat') { $parts += ($LimitKeys | ForEach-Object { Format-Reset (Get-Win $res $_).reset }) -join '/' }
   }
@@ -931,10 +949,10 @@ function Update-Widget {
       }
     }
     if ($nameEl -and $nameMode -eq 'left') { [void]$g.Children.Add($nameEl) }
-    if ($cfg.style -eq 'combined') {
+    if ($cfg.style -eq 'combined' -and -not (Test-NoFiveH $res)) {
       [void]$g.Children.Add((New-CombinedElement $cfg $res $shorts[$cfg.name]))
     } else {
-      $keys = @(Get-TaskbarLimits $cfg)
+      $keys = @(Get-ShownLimits $cfg $res)
       for ($k = 0; $k -lt $keys.Count; $k++) {
         $w = Get-Win $res $keys[$k]
         [void]$g.Children.Add((New-RingElement $w.pct (Get-Caption $keys[$k]) ($k -lt $keys.Count - 1) $shorts[$cfg.name] $w.reset (Get-RingTip $cfg $keys[$k] $w)))
@@ -1459,7 +1477,7 @@ function New-AccountRow($cfg, $shownNames, [bool]$edit) {
     }
   } else {
     $note = Get-Note $res
-    $bars = (Get-BarXaml '5h' (Get-Win $res '5h')) + (Get-BarXaml '7d' (Get-Win $res '7d'))
+    $bars = $(if (Test-NoFiveH $res) { '' } else { Get-BarXaml '5h' (Get-Win $res '5h') }) + (Get-BarXaml '7d' (Get-Win $res '7d'))
     $fable = Get-Win $res 'fable'
     if ($fable -and $null -ne $fable.pct) { $bars += Get-BarXaml 'fable' $fable }
     $noteXaml = if ($note) {
@@ -1592,11 +1610,12 @@ function Update-Legend {
   if ($script:config.showLegend -ne $true) { return }
   $cfgs = @(Get-TaskbarCfgs)
   $parts = @()
-  $pies = @($cfgs | Where-Object { $_.style -eq 'combined' } | ForEach-Object { Get-PieKey $_ } | Select-Object -Unique)
+  $isComb = { param($c) $c.style -eq 'combined' -and -not (Test-NoFiveH (Get-Result $c.name)) }
+  $pies = @($cfgs | Where-Object { & $isComb $_ } | ForEach-Object { Get-PieKey $_ } | Select-Object -Unique)
   if ($pies.Count -eq 1) {
     $parts += "Inner $(Get-Caption $pies[0]), outer $(Get-Caption $(if ($pies[0] -eq '5h') { '7d' } else { '5h' }))"
   } elseif ($pies.Count -gt 1) { $parts += 'Inner and outer: hover a dial' }
-  $ringKeys = @($cfgs | Where-Object { $_.style -ne 'combined' } | ForEach-Object { Get-TaskbarLimits $_ })
+  $ringKeys = @($cfgs | Where-Object { -not (& $isComb $_) } | ForEach-Object { Get-ShownLimits $_ (Get-Result $_.name) })
   $ringKeys = @($LimitKeys | Where-Object { $ringKeys -contains $_ })
   if ($ringKeys.Count -gt 1) { $parts += "Rings left to right: $(($ringKeys | ForEach-Object { Get-Caption $_ }) -join ', ')" }
   if ($parts.Count) {
@@ -2737,6 +2756,19 @@ if ($Snapshot) {
   Save-SettingsSnapshot (Join-Path $Snapshot 'update-7-error.png') 1 { Set-UpdStatus 'Download failed: the remote name could not be resolved' $null }
   $script:update = $null
   Save-SettingsSnapshot (Join-Path $Snapshot 'update-8-updated.png') 1 { Set-UpdStatus "Updated to v$AppVersion" $null }
+
+  # 1.9.3: an account with no 5h window (Ultra) next to two with one: no 5h ring, row, caption or tooltip line.
+  $script:update = $null
+  Set-DemoData
+  foreach ($c in Get-AcctCfgs) { Set-AcctProp $c.name 'taskbar' ($c.name -in 'personal', 'work', 'ultra') }
+  Set-AcctProp 'ultra' 'limits' @('5h', '7d', 'fable')
+  $script:config | Add-Member -Force names 'left'
+  $script:config | Add-Member -Force inside 'percent'; $script:config | Add-Member -Force next 'caption'
+  Set-AcctProp 'ultra' 'style' 'combined'
+  Save-BarSnapshot (Join-Path $Snapshot 'ultra-bar-combined.png') 1 (Get-AccountTipFor 'ultra')
+  Set-AcctProp 'ultra' 'style' 'rings'
+  Save-BarSnapshot (Join-Path $Snapshot 'ultra-bar-rings.png') 1 (Get-AccountTipFor 'ultra')
+  Save-Snapshot (Join-Path $Snapshot 'ultra-popup.png')
   exit
 }
 
