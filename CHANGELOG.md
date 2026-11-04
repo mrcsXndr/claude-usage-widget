@@ -3,6 +3,14 @@
 All notable changes to Claude Usage Widget. Versions follow [semantic versioning](https://semver.org/).
 Each version is a [GitHub release](https://github.com/mrcsXndr/claude-usage-widget/releases) with an installer.
 
+## [1.9.4] - 2026-11-04
+
+### Changed
+- **Plan names**: the plan label now also understands Team and Enterprise (and Pro / Max / Ultra) from whatever the profile API reports, and tidies unknown names (`claude_max_plus` becomes "Max Plus"). The Settings plan picker adds Team and Enterprise.
+
+### Notes
+- Whether an account shows a 5h ring is decided only by the rate-limit data (since 1.9.3), never by the plan name. Checked 2026-11-04 with raw probe headers: the Max 20x accounts return no `unified-5h-*` headers (7d only), while the newer `revbay` account returns `5h` and `7d`, so its 5h ring is real. Setup-tokens cannot read their plan (profile API 403), so pick it in Settings if you want it shown.
+
 ## [1.9.3] - 2026-11-01
 
 ### Fixed
