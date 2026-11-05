@@ -25,7 +25,7 @@ $FableModel = 'claude-fable-5-1'
 $ClaudeCodeSystem = "You are Claude Code, Anthropic's official CLI for Claude."
 $LimitKeys  = @('5h', '7d', 'fable')
 $DefaultCaptions = [ordered]@{ '5h' = '5h'; '7d' = '7d'; 'fable' = 'Fable' }
-$AppVersion = '1.9.4'
+$AppVersion = '2.0.0'
 # Self-update: the latest-release API, and the one zip "Update now" may download (the same asset install.ps1 uses).
 $ReleaseApiUrl = 'https://api.github.com/repos/mrcsXndr/claude-usage-widget/releases/latest'
 $UpdateZipUrl  = 'https://github.com/mrcsXndr/claude-usage-widget/releases/latest/download/ClaudeUsageWidget.zip'
@@ -217,13 +217,113 @@ function Read-Config {
   if (-not (Test-Path $ConfigPath)) {
     $cfg = [pscustomobject]@{ refreshMinutes = 30; captions = [pscustomobject]$DefaultCaptions; accounts = @() }
     [void](Add-DiscoveredAccounts $cfg)
+    [void](Update-ConfigV2 $cfg)
     Save-Config $cfg
   }
   $cfg = Get-Content $ConfigPath -Raw | ConvertFrom-Json
   if (-not $cfg.refreshMinutes) { $cfg | Add-Member -Force refreshMinutes 30 }
   if (-not $cfg.captions) { $cfg | Add-Member -Force captions ([pscustomobject]$DefaultCaptions) }
   if (-not $cfg.accounts) { $cfg | Add-Member -Force accounts @() }
+  # 1.x -> 2.0: keep a copy as config.v1.json (never overwritten), then map the old keys once.
+  if ([int]$cfg.configVersion -lt 2) {
+    try {
+      $bak = Join-Path (Split-Path $ConfigPath) 'config.v1.json'
+      if (-not (Test-Path $bak)) { Copy-Item $ConfigPath $bak }
+      [void](Update-ConfigV2 $cfg)
+      Save-Config $cfg
+    } catch { Write-Log "config migration: $($_.Exception.Message)" }
+  }
   return $cfg
+}
+
+# What the three Looks (presets) set. 'custom' keeps whatever the individual options say.
+$LookPresets = @{
+  minimal  = @{ size = 'compact'; inside = 'initials'; next = 'none';  names = 'hidden' }
+  balanced = @{ size = 'normal';  inside = 'initials'; next = 'usage'; names = 'hidden' }
+  detailed = @{ size = 'large';   inside = 'initials'; next = 'usage'; names = 'left' }
+}
+
+# Maps a 1.9.x config (a parsed config.json) to the 2.0 keys in place; returns $true when it changed anything.
+# Old keys: showPercents / showCaptions / showNames fold into inside / next / names, hideAtLimit becomes atLimit,
+# showLegend is dropped. size / inside / next / names that match a Look exactly select it, any other mix is 'custom'
+# (with the effective values written out, so the taskbar looks the same as before).
+function Update-ConfigV2($cfg) {
+  if ([int]$cfg.configVersion -ge 2) { return $false }
+  $has = { param($k) [bool]$cfg.PSObject.Properties[$k] }
+  $set = { param($k, $v) $cfg | Add-Member -Force -NotePropertyName $k -NotePropertyValue $v }
+  $touched = @('size', 'inside', 'next', 'names', 'showPercents', 'showCaptions', 'showNames') | Where-Object { & $has $_ }
+  if (-not (& $has 'look')) {
+    if (-not @($touched).Count) { & $set 'look' 'balanced' }
+    else {
+      $size = if ("$($cfg.size)" -in 'compact', 'normal', 'large') { "$($cfg.size)" } else { 'compact' }
+      $inside = if ("$($cfg.inside)" -in 'none', 'initials', 'percent') { "$($cfg.inside)" } elseif ($cfg.showPercents -eq $false) { 'initials' } else { 'percent' }
+      $next = if ("$($cfg.next)" -in 'none', 'caption', 'percent', 'usage', 'resetin', 'resetat') { "$($cfg.next)" } elseif ($cfg.showPercents -eq $false -or $cfg.showCaptions -eq $false) { 'none' } else { 'caption' }
+      $names = if ("$($cfg.names)" -in 'left', 'right', 'hidden') { "$($cfg.names)" } elseif ($cfg.showNames -eq $false) { 'hidden' } else { 'left' }
+      $look = 'custom'
+      foreach ($k in $LookPresets.Keys) {
+        $p = $LookPresets[$k]
+        if ($p.size -eq $size -and $p.inside -eq $inside -and $p.next -eq $next -and $p.names -eq $names) { $look = $k }
+      }
+      & $set 'look' $look
+      & $set 'size' $size; & $set 'inside' $inside; & $set 'next' $next; & $set 'names' $names
+    }
+  }
+  foreach ($k in 'showPercents', 'showCaptions', 'showNames', 'showLegend') { if (& $has $k) { $cfg.PSObject.Properties.Remove($k) } }
+  if (-not (& $has 'atLimit')) {
+    $al = if (& $has 'hideAtLimit') { if ($cfg.hideAtLimit -eq $true) { 'hide' } else { 'show' } } else { 'group' }
+    & $set 'atLimit' $al
+  }
+  if (& $has 'hideAtLimit') { $cfg.PSObject.Properties.Remove('hideAtLimit') }
+  foreach ($d in @(@('show5h', $true), @('timeFormat', '12h'), @('listLimited', 'group'), @('listFable', 'used'), @('listPlan', $true))) {
+    if (-not (& $has $d[0])) { & $set $d[0] $d[1] }
+  }
+  & $set 'configVersion' 2
+  return $true
+}
+
+# ---------------------------------------------------------------- reset times
+
+$DayCodes = @('Su', 'M', 'Tu', 'W', 'Th', 'F', 'Sa')   # indexed by [DayOfWeek]
+$DayNames = @('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')
+
+function Format-ClockShort([DateTime]$dt, [string]$fmt) {
+  if ($fmt -eq '24h') { return $dt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture) }
+  $h = $dt.Hour % 12; if ($h -eq 0) { $h = 12 }
+  $ap = if ($dt.Hour -lt 12) { 'am' } else { 'pm' }
+  if ($dt.Minute -eq 0) { return "$h$ap" }
+  return '{0}:{1:00}{2}' -f $h, $dt.Minute, $ap
+}
+
+# The compact reset text: 'in 37m', 'in 2h 14m' (a 5h window counts down), '11pm' (later today), 'Su 11pm' / 'Tu 3pm' (another day).
+# $iso is an ISO time or DateTime; $fmt is 12h or 24h; $now exists for tests. Empty when there is no time or it has passed.
+function Format-ResetShort($iso, [string]$fmt = '12h', $now = $null) {
+  if ($null -eq $iso -or $iso -eq '') { return '' }
+  $dt = if ($iso -is [DateTime]) { $iso } else { [DateTime]::Parse($iso, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) }
+  if ($dt.Kind -eq 'Utc') { $dt = $dt.ToLocalTime() }
+  $n = if ($null -eq $now) { Get-Date } else { [DateTime]$now }
+  $span = $dt - $n
+  if ($span.TotalSeconds -le 0) { return '' }
+  $mins = [int][Math]::Ceiling($span.TotalMinutes)
+  if ($mins -lt 60) { return "in ${mins}m" }
+  if ($mins -lt 300) { return 'in {0}h {1:00}m' -f [int][Math]::Floor($mins / 60), ($mins % 60) }
+  if ($dt.Date -eq $n.Date) { return (Format-ClockShort $dt $fmt) }
+  return "$($DayCodes[[int]$dt.DayOfWeek]) $(Format-ClockShort $dt $fmt)"
+}
+
+# The spelled-out form for tooltips: 'Resets Tuesday 3:00 pm (in 4d 23h)'.
+function Format-ResetLong($iso, [string]$fmt = '12h', $now = $null) {
+  if ($null -eq $iso -or $iso -eq '') { return '' }
+  $dt = if ($iso -is [DateTime]) { $iso } else { [DateTime]::Parse($iso, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) }
+  if ($dt.Kind -eq 'Utc') { $dt = $dt.ToLocalTime() }
+  $n = if ($null -eq $now) { Get-Date } else { [DateTime]$now }
+  $span = $dt - $n
+  if ($span.TotalSeconds -le 0) { return '' }
+  $clock = if ($fmt -eq '24h') { $dt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture) } else { $dt.ToString('h:mm tt', [Globalization.CultureInfo]::InvariantCulture).ToLower() }
+  $when = if ($dt.Date -eq $n.Date) { "today $clock" } else { "$($DayNames[[int]$dt.DayOfWeek]) $clock" }
+  $in = if ($span.TotalHours -lt 1) { '{0}m' -f [int][Math]::Ceiling($span.TotalMinutes) }
+        elseif ($span.TotalHours -lt 24) { '{0}h {1:00}m' -f [int][Math]::Floor($span.TotalHours), $span.Minutes }
+        else { '{0}d {1}h' -f [int][Math]::Floor($span.TotalDays), $span.Hours }
+  return "Resets $when (in $in)"
 }
 
 # ---------------------------------------------------------------- tokens

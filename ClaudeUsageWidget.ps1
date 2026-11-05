@@ -21,8 +21,12 @@
 .PARAMETER RingCheck
   Render the rings at known percentages, measure each arc's sweep from the pixels, print a table and exit
   (exit code 1 when any arc is off by more than 1 degree).
+.PARAMETER FormatCheck
+  Check the compact reset-time text (Format-ResetShort) against the table in the 2.0 spec; exit 1 on a miss.
+.PARAMETER MigrateCheck
+  Check the 1.x -> 2.0 config migration on fixture configs (and the config.v1.json backup); exit 1 on a miss.
 #>
-param([switch]$Once, [switch]$Demo, [string]$Snapshot, [switch]$RingCheck)
+param([switch]$Once, [switch]$Demo, [string]$Snapshot, [switch]$RingCheck, [switch]$FormatCheck, [switch]$MigrateCheck)
 
 $ErrorActionPreference = 'Stop'
 $LibPath = Join-Path $PSScriptRoot 'lib\Usage.ps1'
@@ -31,6 +35,112 @@ $LibPath = Join-Path $PSScriptRoot 'lib\Usage.ps1'
 if ($Once) {
   Get-AllUsage (Read-Config) | ConvertTo-Json -Depth 4
   exit
+}
+
+$script:checkFails = 0
+function Assert-Eq([string]$what, $got, $want) {
+  $ok = "$got" -ceq "$want"
+  if (-not $ok) { $script:checkFails++ }
+  '{0,-4} {1}  got [{2}] want [{3}]' -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $what, $got, $want
+}
+
+if ($FormatCheck) {
+  $now = [DateTime]'2026-11-04 12:00:00'   # a Wednesday, local time
+  $at = { param($t) $t.ToUniversalTime().ToString('o') }
+  $cases = @(
+    @('none', $null, '12h', ''), @('empty', '', '12h', ''),
+    @('past', (& $at $now.AddMinutes(-1)), '12h', ''), @('now', (& $at $now), '12h', ''),
+    @('37 min', (& $at $now.AddMinutes(37)), '12h', 'in 37m'),
+    @('1 min', (& $at $now.AddSeconds(20)), '12h', 'in 1m'),
+    @('59.5 min rounds up to 1 h', (& $at $now.AddSeconds(3570)), '12h', 'in 1h 00m'),
+    @('exactly 60 min', (& $at $now.AddMinutes(60)), '12h', 'in 1h 00m'),
+    @('2h 14m', (& $at $now.AddMinutes(134)), '12h', 'in 2h 14m'),
+    @('4h 59m', (& $at $now.AddMinutes(299)), '12h', 'in 4h 59m'),
+    @('exactly 5 h, same day', (& $at $now.AddHours(5)), '12h', '5pm'),
+    @('later today :30', (& $at $now.AddMinutes(330)), '12h', '5:30pm'),
+    @('later today 11pm', (& $at $now.AddHours(11)), '12h', '11pm'),
+    @('midnight is next day 12am', (& $at $now.AddHours(12)), '12h', 'Th 12am'),
+    @('00:30 next day', (& $at $now.AddMinutes(750)), '12h', 'Th 12:30am'),
+    @('noon next day', (& $at $now.AddDays(1)), '12h', 'Th 12pm'),
+    @('Fri 3pm', (& $at $now.AddDays(2).AddHours(3)), '12h', 'F 3pm'),
+    @('Sat', (& $at $now.AddDays(3)), '12h', 'Sa 12pm'),
+    @('Sun 11pm', (& $at $now.AddDays(4).AddHours(11)), '12h', 'Su 11pm'),
+    @('Mon 6:05am', (& $at $now.AddDays(5).AddHours(-6).AddMinutes(5)), '12h', 'M 6:05am'),
+    @('Tue 3pm', (& $at $now.AddDays(6).AddHours(3)), '12h', 'Tu 3pm'),
+    @('next Wed 12pm', (& $at $now.AddDays(7)), '12h', 'W 12pm'),
+    @('24h later today', (& $at $now.AddHours(5)), '24h', '17:00'),
+    @('24h other day', (& $at $now.AddDays(4).AddHours(3)), '24h', 'Su 15:00'),
+    @('24h midnight', (& $at $now.AddHours(12)), '24h', 'Th 00:00'),
+    @('24h countdown unchanged', (& $at $now.AddMinutes(37)), '24h', 'in 37m')
+  )
+  foreach ($c in $cases) { Assert-Eq $c[0] (Format-ResetShort $c[1] $c[2] $now) $c[3] }
+  Assert-Eq 'DateTime input' (Format-ResetShort $now.AddHours(11) '12h' $now) '11pm'
+  Assert-Eq 'long form' (Format-ResetLong (& $at $now.AddDays(6).AddHours(3)) '12h' $now) 'Resets Tuesday 3:00 pm (in 6d 3h)'
+  Assert-Eq 'long form 24h' (Format-ResetLong (& $at $now.AddHours(5)) '24h' $now) 'Resets today 17:00 (in 5h 00m)'
+  if ($script:checkFails) { "$($script:checkFails) format check(s) FAILED"; exit 1 }
+  'all format checks passed'
+  exit 0
+}
+
+if ($MigrateCheck) {
+  $accts = '"accounts":[{"name":"a","source":"env","env":"X","limits":["7d"],"style":"combined"}]'
+  $fx = @{
+    default = "{`"refreshMinutes`":15,$accts}"
+    hideTrue = "{`"refreshMinutes`":15,`"hideAtLimit`":true,`"size`":`"normal`",`"inside`":`"percent`",`"next`":`"caption`",`"names`":`"right`",$accts}"
+    hideFalse = "{`"refreshMinutes`":15,`"hideAtLimit`":false,$accts}"
+    legacy = "{`"refreshMinutes`":15,`"showPercents`":false,`"showCaptions`":false,`"showNames`":false,`"showLegend`":true,$accts}"
+    v194 = "{`"refreshMinutes`":15,`"hideAtLimit`":true,`"showPercents`":false,`"showLegend`":true,$accts}"
+    preset = "{`"size`":`"normal`",`"inside`":`"initials`",`"next`":`"usage`",`"names`":`"hidden`",$accts}"
+    v2 = "{`"configVersion`":2,`"look`":`"detailed`",`"atLimit`":`"show`",$accts}"
+  }
+  $m = @{}
+  foreach ($k in $fx.Keys) { $m[$k] = ($fx[$k] | ConvertFrom-Json); [void](Update-ConfigV2 $m[$k]) }
+  foreach ($k in 'default', 'hideTrue', 'hideFalse', 'legacy', 'v194', 'preset', 'v2') {
+    $c = $m[$k]
+    Assert-Eq "$k configVersion" $c.configVersion 2
+    Assert-Eq "$k accounts kept" ($c.accounts[0].name + '/' + $c.accounts[0].style + '/' + $c.accounts[0].limits[0]) 'a/combined/7d'
+    foreach ($gone in 'hideAtLimit', 'showLegend', 'showPercents', 'showCaptions', 'showNames') { Assert-Eq "$k drops $gone" ([bool]$c.PSObject.Properties[$gone]) $false }
+  }
+  $c = $m.default
+  Assert-Eq 'default look' $c.look 'balanced'; Assert-Eq 'default atLimit' $c.atLimit 'group'; Assert-Eq 'default show5h' $c.show5h $true
+  Assert-Eq 'default timeFormat' $c.timeFormat '12h'; Assert-Eq 'default listLimited' $c.listLimited 'group'
+  Assert-Eq 'default listFable' $c.listFable 'used'; Assert-Eq 'default listPlan' $c.listPlan $true
+  Assert-Eq 'default refresh kept' $c.refreshMinutes 15
+  $c = $m.hideTrue
+  Assert-Eq 'hideTrue atLimit' $c.atLimit 'hide'; Assert-Eq 'hideTrue look' $c.look 'custom'
+  Assert-Eq 'hideTrue values kept' "$($c.size)/$($c.inside)/$($c.next)/$($c.names)" 'normal/percent/caption/right'
+  Assert-Eq 'hideFalse atLimit' $m.hideFalse.atLimit 'show'
+  $c = $m.legacy
+  Assert-Eq 'legacy look' $c.look 'minimal'; Assert-Eq 'legacy values' "$($c.size)/$($c.inside)/$($c.next)/$($c.names)" 'compact/initials/none/hidden'
+  $c = $m.v194
+  Assert-Eq 'v194 atLimit' $c.atLimit 'hide'; Assert-Eq 'v194 look' $c.look 'custom'
+  Assert-Eq 'v194 values' "$($c.size)/$($c.inside)/$($c.next)/$($c.names)" 'compact/initials/none/left'
+  Assert-Eq 'preset look' $m.preset.look 'balanced'
+  Assert-Eq 'v2 untouched' "$($m.v2.look)/$($m.v2.atLimit)" 'detailed/show'
+  Assert-Eq 'v2 returns false' (Update-ConfigV2 $m.v2) $false
+
+  # File round trip in a temp folder: the backup is a byte-for-byte copy and a second read changes nothing.
+  $tmp = Join-Path $env:TEMP "cuw-migrate-$PID"
+  New-Item -ItemType Directory -Force $tmp | Out-Null
+  $AppDir = $tmp; $ConfigPath = Join-Path $tmp 'config.json'
+  try {
+    Set-Content $ConfigPath $fx.v194 -Encoding UTF8
+    $hash = { param($p) [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($p))) }
+    $orig = & $hash $ConfigPath
+    $cfg = Read-Config
+    Assert-Eq 'file: configVersion' $cfg.configVersion 2
+    Assert-Eq 'file: config.v1.json exists' (Test-Path (Join-Path $tmp 'config.v1.json')) $true
+    Assert-Eq 'file: backup identical to the old config' (& $hash (Join-Path $tmp 'config.v1.json')) $orig
+    $saved = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+    Assert-Eq 'file: saved atLimit' $saved.atLimit 'hide'
+    $h1 = & $hash $ConfigPath
+    [void](Read-Config)
+    Assert-Eq 'file: second read leaves config.json alone' (& $hash $ConfigPath) $h1
+    Assert-Eq 'file: second read leaves the backup alone' (& $hash (Join-Path $tmp 'config.v1.json')) $orig
+  } finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+  if ($script:checkFails) { "$($script:checkFails) migration check(s) FAILED"; exit 1 }
+  'all migration checks passed'
+  exit 0
 }
 if ($Snapshot -or $RingCheck) { $Demo = $true }
 
@@ -96,7 +206,7 @@ if (-not $Demo) {
     $saved = Get-Content $StatePath -Raw | ConvertFrom-Json
     if ($null -ne $saved.right) { $script:state.right = $saved.right }
     # Update check: when it last ran (unix seconds), the newer release found, which one was announced, which one is installing.
-    foreach ($k in 'updateCheckedAt', 'updateVersion', 'updateNotes', 'notifiedVersion', 'pendingUpdate', 'ignoredAccounts') {
+    foreach ($k in 'updateCheckedAt', 'updateVersion', 'updateNotes', 'notifiedVersion', 'pendingUpdate', 'ignoredAccounts', 'hintCount', 'limitedOpen') {
       if ($null -ne $saved.$k) { $script:state[$k] = $saved.$k }
     }
   } catch {}
@@ -115,21 +225,38 @@ function Save-State {
 $script:config = $null
 $script:configError = $null
 
+function New-DefaultConfig($accounts = @()) {
+  $c = [pscustomobject]@{ refreshMinutes = 30; captions = [pscustomobject]$DefaultCaptions; accounts = @($accounts) }
+  [void](Update-ConfigV2 $c)
+  return $c
+}
+
 # Until the first refresh has run (and, on a first run, discovered accounts), there may be no file yet.
 function Import-UiConfig {
   if ($Demo) { return }
   try {
-    $script:config = if (Test-Path $ConfigPath) { Read-Config } else { [pscustomobject]@{ refreshMinutes = 30; captions = [pscustomobject]$DefaultCaptions; accounts = @() } }
+    $script:config = if (Test-Path $ConfigPath) { Read-Config } else { New-DefaultConfig }
     $script:configError = $null
   } catch {
     $script:configError = "config.json: $($_.Exception.Message)"
-    if (-not $script:config) { $script:config = [pscustomobject]@{ refreshMinutes = 30; captions = [pscustomobject]$DefaultCaptions; accounts = @() } }
+    if (-not $script:config) { $script:config = New-DefaultConfig }
   }
 }
 
+# Settings apply at once: an edit schedules one write 400 ms after the last edit (Flush-UiConfig writes now).
+$script:savePending = $false
+$saveTimer = New-Object Windows.Threading.DispatcherTimer
+$saveTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+$saveTimer.Add_Tick({ Flush-UiConfig })
 function Save-UiConfig {
-  if ($script:editing) { Update-SettingsButtons }
-  if ($Demo -or $script:editing) { return }
+  if ($Demo) { return }
+  $script:savePending = $true
+  $saveTimer.Stop(); $saveTimer.Start()
+}
+function Flush-UiConfig {
+  $saveTimer.Stop()
+  if (-not $script:savePending) { return }
+  $script:savePending = $false
   try { Save-Config $script:config } catch { Write-Log "save config: $_" }
 }
 
@@ -193,10 +320,21 @@ function Get-TaskbarLimits($cfg) {
 
 # Plans without a 5-hour window (Ultra) report none: the usage API's five_hour is null, or the probe has no
 # anthropic-ratelimit-unified-5h-* headers. Only a read that worked counts, so an error or "loading" is not "no 5h".
+# Also true while "Show the 5-hour window" is off, so every caller (bars, rings, tooltips, the list) drops 5h at once.
 function Test-NoFiveH($res) {
+  if ($script:config.show5h -eq $false) { return $true }
+  return (Test-LacksFiveH $res)
+}
+# The account's read worked and returned no 5h number (Ultra and similar); an error or "loading" is not "no 5h".
+function Test-LacksFiveH($res) {
   if (-not $res -or $res.status -notin 'ok', 'limited') { return $false }
   $w = $res.five_h
   return (-not $w -or $null -eq $w.pct)
+}
+# The account really has a 5h window (its read worked and returned a 5h number), whatever show5h says.
+function Test-HasFiveH($res) {
+  if (-not $res -or $res.status -notin 'ok', 'limited') { return $false }
+  return ($res.five_h -and $null -ne $res.five_h.pct)
 }
 
 # The limits an account really shows: its taskbar choice minus 5h when it has none (never empty: 7d then).
@@ -222,15 +360,38 @@ function Get-TaskbarCfgs {
   return @()
 }
 
-# Accounts drawn on the taskbar: the ticked ones, minus (when "Hide an account while it's at its limit" is on) those
-# whose 5h or 7d window is full right now; they come back after the reset. If that would hide every account they all
-# stay, so the widget never vanishes. The list and Settings always use Get-TaskbarCfgs (what is ticked).
+# An account is limited while its read says so and a 5h or 7d window is still at 100% (a window whose reset has passed counts as 0).
+function Test-Limited($res) {
+  if (-not $res -or $res.status -ne 'limited') { return $false }
+  return ((Get-Win $res '5h').pct -ge 100) -or ((Get-Win $res '7d').pct -ge 100)
+}
+# When a limited account is back: the later reset of its windows that sit at 100% (a DateTime), else $null.
+function Get-BackAt($res) {
+  $best = $null
+  foreach ($k in '5h', '7d') {
+    $w = Get-Win $res $k
+    if ($w -and $w.pct -ge 100 -and $w.reset) { $t = ConvertTo-LocalTime $w.reset; if (-not $best -or $t -gt $best) { $best = $t } }
+  }
+  return $best
+}
+function Get-AtLimitMode { $v = "$($script:config.atLimit)"; if ($v -in 'group', 'show', 'hide') { $v } else { 'group' } }
+
+# Accounts drawn on the taskbar as normal items: the ticked ones. At limit: group (default) draws those that are full as
+# ONE item instead (Get-LimitedCfgs); show keeps them as red items; hide drops them until the reset (but if that would
+# hide every account they all stay, so the widget never vanishes). The list and Settings use Get-TaskbarCfgs.
 function Get-ShownCfgs {
   $all = @(Get-TaskbarCfgs)
-  if ($script:config.hideAtLimit -ne $true) { return $all }
-  $ok = @($all | Where-Object { $r = Get-Result $_.name; -not ($r -and ((Get-Win $r '5h').pct -ge 100 -or (Get-Win $r '7d').pct -ge 100)) })
-  if ($ok.Count) { return $ok }
-  return $all
+  $mode = Get-AtLimitMode
+  if ($mode -eq 'show') { return $all }
+  $ok = @($all | Where-Object { -not (Test-Limited (Get-Result $_.name)) })
+  if ($mode -eq 'hide' -and -not $ok.Count) { return $all }
+  return $ok
+}
+# The accounts the at-limit group stands for, soonest back first (empty unless the mode is group).
+function Get-LimitedCfgs {
+  if ((Get-AtLimitMode) -ne 'group') { return @() }
+  $l = @(Get-TaskbarCfgs | Where-Object { Test-Limited (Get-Result $_.name) })
+  return @($l | Sort-Object { $b = Get-BackAt (Get-Result $_.name); if ($b) { $b.Ticks } else { [int64]::MaxValue } })
 }
 
 function Set-AcctProp($name, $key, $value) {
@@ -262,14 +423,18 @@ function Set-Limit($name, $key, [bool]$on, $checkbox) {
 
 # ---------------------------------------------------------------- theme
 
-$isLight = $false
-if (-not $Snapshot -and -not $RingCheck) {
-  try { $isLight = (Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' SystemUsesLightTheme) -eq 1 } catch {}
+function Get-SystemLight {
+  try { return (Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' SystemUsesLightTheme) -eq 1 } catch { return $false }
 }
+$isLight = $false
+if ($env:CUW_THEME -in 'light', 'dark') { $isLight = $env:CUW_THEME -eq 'light' }   # for snapshots and testing
+elseif (-not $Snapshot -and -not $RingCheck) { $isLight = Get-SystemLight }
 $Theme = if ($isLight) {
-  @{ fg = '#1A1A1A'; sub = '#5F5F5F'; ring = '#26000000'; card = '#F9F9F9'; border = '#D0D0D0'; hover = '#EAEAEA'; bar = '#E3E3E3'; field = '#FFFFFF'; widgetHover = '#1A000000' }
+  @{ fg = '#1A1A1A'; sub = '#5F5F5F'; ring = '#26000000'; card = '#F9F9F9'; border = '#D0D0D0'; hover = '#EAEAEA'; bar = '#E3E3E3'; field = '#FFFFFF'; widgetHover = '#1A000000'
+     chip = '#0F000000'; row = '#FFFFFF'; rowline = '#12000000'; nav = '#0E000000'; win = '#F3F3F3'; tb = '#EEEEEE' }
 } else {
-  @{ fg = '#FFFFFF'; sub = '#A3A3A3'; ring = '#3DFFFFFF'; card = '#202020'; border = '#3A3A3A'; hover = '#2B2B2B'; bar = '#3A3A3A'; field = '#2B2B2B'; widgetHover = '#1FFFFFFF' }
+  @{ fg = '#FFFFFF'; sub = '#A3A3A3'; ring = '#3DFFFFFF'; card = '#202020'; border = '#3A3A3A'; hover = '#2B2B2B'; bar = '#3A3A3A'; field = '#2B2B2B'; widgetHover = '#1FFFFFFF'
+     chip = '#14FFFFFF'; row = '#0BFFFFFF'; rowline = '#40000000'; nav = '#0FFFFFFF'; win = '#202020'; tb = '#1C1C1C' }
 }
 $Colors = @{ ok = '#4CC38A'; warn = '#F2B84B'; bad = '#F0625D'; none = '#8A8A8A'; accent = '#D97757' }
 
@@ -301,15 +466,10 @@ function ConvertTo-LocalTime($v) {
 
 function Format-Pct($pct) { if ($null -eq $pct) { return $null } [string][Math]::Round([double]$pct) }
 
-function Format-Reset($iso) {
-  $dt = ConvertTo-LocalTime $iso
-  if ($null -eq $dt) { return '' }
-  $span = $dt - (Get-Date)
-  if ($span.TotalMinutes -le 0) { return '' }
-  if ($span.TotalHours -lt 1) { return 'in {0}m' -f [int][Math]::Ceiling($span.TotalMinutes) }
-  if ($span.TotalHours -lt 24) { return 'in {0}h {1:00}m' -f [int][Math]::Floor($span.TotalHours), $span.Minutes }
-  return $dt.ToString('ddd HH:mm')
-}
+function Get-TimeFormat { if ("$($script:config.timeFormat)" -eq '24h') { '24h' } else { '12h' } }
+# Compact reset text for bars and lists ('in 37m', '11pm', 'Su 11pm'); the tooltip spells it out (Format-ResetLong).
+function Get-Reset($iso) { Format-ResetShort $iso (Get-TimeFormat) }
+function Get-ResetLong($iso) { Format-ResetLong $iso (Get-TimeFormat) }
 
 function Get-RawWin($res, $key) {
   if (-not $res) { return $null }
@@ -346,26 +506,36 @@ function Get-Cooldown {
   return [int][Math]::Ceiling($left)
 }
 
+# Generic demo accounts (docs images must never show real account names): three Ultra-style accounts with 7d + Fable,
+# one with a 5h window, three at their limit (back on Sunday at 1am, 5am and 9pm).
 function Set-DemoData {
   $now = [DateTime]::UtcNow
-  $w = { param($p, $mins) [pscustomobject]@{ pct = $p; reset = $(if ($null -ne $mins) { $now.AddMinutes($mins).ToString('o') }) } }
-  $script:config = [pscustomobject]@{
-    refreshMinutes = 30
-    captions = [pscustomobject]$DefaultCaptions
-    accounts = @(
-      [pscustomobject]@{ name = 'personal'; label = 'Personal'; plan = 'Max 20x'; source = 'claude-code'; taskbar = $true; limits = @('5h', '7d', 'fable') }
-      [pscustomobject]@{ name = 'work'; label = 'Work'; plan = 'Max 5x'; source = 'xndr-claude'; taskbar = $true; style = 'combined'; pie = '5h' }
-      [pscustomobject]@{ name = 'side'; label = 'Side project'; plan = 'Pro'; source = 'env' }
-      [pscustomobject]@{ name = 'ultra'; label = 'Ultra'; plan = 'Ultra'; source = 'env' }
-    )
-  }
-  $script:accounts = @(
-    [pscustomobject]@{ name = 'personal'; status = 'ok'; error = $null; method = 'usage-api'; apiPlan = 'Max 20x'; five_h = (& $w 64 72); seven_d = (& $w 43 1574); fable = (& $w 38 1574) }
-    [pscustomobject]@{ name = 'work'; status = 'ok'; error = $null; method = 'probe'; five_h = (& $w 12 282); seven_d = (& $w 30 6060); fable = (& $w 56 6060) }
-    [pscustomobject]@{ name = 'side'; status = 'limited'; error = $null; method = 'probe'; five_h = (& $w 100 38); seven_d = (& $w 71 2900); fable = (& $w $null $null) }
-    [pscustomobject]@{ name = 'ultra'; status = 'ok'; error = $null; method = 'probe'; five_h = (& $w $null $null); seven_d = (& $w 58 3000); fable = (& $w 12 3000) }
+  # $when is minutes from now, or a local DateTime.
+  $w = { param($p, $when) [pscustomobject]@{ pct = $p; reset = $(if ($when -is [DateTime]) { $when.ToUniversalTime().ToString('o') } elseif ($null -ne $when) { $now.AddMinutes($when).ToString('o') }) } }
+  # The next given weekday after today at midnight + $h hours.
+  $dow = { param([DayOfWeek]$d, [double]$h) $t = (Get-Date).Date.AddDays(1); while ($t.DayOfWeek -ne $d) { $t = $t.AddDays(1) }; $t.AddHours($h) }
+  $script:config = New-DefaultConfig @(
+    [pscustomobject]@{ name = 'personal'; label = 'Personal'; plan = 'Ultra'; source = 'claude-code'; taskbar = $true; limits = @('7d') }
+    [pscustomobject]@{ name = 'work'; label = 'Work'; plan = 'Ultra'; source = 'env'; taskbar = $true; limits = @('7d') }
+    [pscustomobject]@{ name = 'studio'; label = 'Studio'; plan = 'Ultra'; source = 'env'; taskbar = $true; limits = @('7d') }
+    [pscustomobject]@{ name = 'side'; label = 'Side project'; plan = 'Max 20x'; source = 'env'; taskbar = $true; style = 'combined'; pie = '5h' }
+    [pscustomobject]@{ name = 'client'; label = 'Client'; plan = 'Ultra'; source = 'env'; taskbar = $true; limits = @('7d') }
+    [pscustomobject]@{ name = 'lab'; label = 'Lab'; plan = 'Ultra'; source = 'env'; taskbar = $true; limits = @('7d') }
+    [pscustomobject]@{ name = 'backup'; label = 'Backup'; plan = 'Ultra'; source = 'env'; taskbar = $true; limits = @('7d') }
   )
-  $script:updated = (Get-Date).Date.AddHours(11).AddMinutes(46)
+  $ok = { param($n, $five, $seven, $fable, $status = 'ok') [pscustomobject]@{ name = $n; status = $status; error = $null; method = 'probe'; five_h = $five; seven_d = $seven; fable = $fable } }
+  $none = & $w $null $null
+  $script:accounts = @(
+    (& $ok 'personal' $none (& $w 14 (& $dow Wednesday 12)) (& $w 0 (& $dow Wednesday 12)))
+    (& $ok 'work' $none (& $w 52 (& $dow Sunday 23)) (& $w 0 (& $dow Sunday 23)))
+    (& $ok 'studio' $none (& $w 34 (& $dow Sunday 18)) (& $w 0 (& $dow Sunday 18)))
+    (& $ok 'side' (& $w 64 37) (& $w 52 (& $dow Tuesday 15)) (& $w 0 (& $dow Tuesday 15)))
+    (& $ok 'client' $none (& $w 100 (& $dow Sunday 1)) $none 'limited')
+    (& $ok 'lab' $none (& $w 100 (& $dow Sunday 5)) $none 'limited')
+    (& $ok 'backup' $none (& $w 100 (& $dow Sunday 21)) $none 'limited')
+  )
+  $script:updated = (Get-Date).Date.AddHours(14).AddMinutes(6)
+  $script:config.refreshMinutes = 15
 }
 
 # Reads run in a background runspace so token commands and HTTP never block the UI.
@@ -412,7 +582,12 @@ function Complete-Refresh {
   } finally {
     $j.ps.Dispose()
   }
-  if (-not $script:editing) { Import-UiConfig }
+  # An edit still waiting for its write is newer than the file: keep it, and pick up accounts a scan just added.
+  if ($script:savePending) {
+    if ($j.discover -and -not $Demo) {
+      try { foreach ($a in @((Read-Config).accounts | Where-Object { $_ })) { if (-not (Get-AcctCfg $a.name)) { $script:config.accounts = @(Get-AcctCfgs) + @($a) } } } catch {}
+    }
+  } else { Import-UiConfig }
   $script:forcePopup = $true
   Update-All
 }
@@ -458,8 +633,8 @@ function Show-Toast([string]$title, [string]$text) {
 }
 
 function Set-DemoUpdate {
-  $script:update = [pscustomobject]@{ version = '1.9.3'; notes = "Self-update check with a tray notification`nFaster refresh on wake" }
-  $script:updMsg = if ($script:updManual) { 'v1.9.3 is available' }
+  $script:update = [pscustomobject]@{ version = '2.1.0'; notes = "Self-update check with a tray notification`nFaster refresh on wake" }
+  $script:updMsg = if ($script:updManual) { 'v2.1.0 is available' }
 }
 
 function Start-UpdateCheck([switch]$Manual) {
@@ -538,9 +713,12 @@ function Update-UpdateControls {
   $PopupEls.UpdInstallBtn.Visibility = if ($script:update) { 'Visible' } else { 'Collapsed' }
   $PopupEls.UpdInstallBtn.IsEnabled = -not $busy
   $PopupEls.UpdInstallBtn.Content = if ($busy) { "Updating$ELL" } elseif ($script:update) { "Install v$($script:update.version)" } else { 'Install update' }
-  $PopupEls.UpdBtn.Content = if ($busy) { "Updating$ELL" } else { 'Update now' }
+  $PopupEls.UpdBtn.Content = if ($busy) { "Updating$ELL" } else { 'Update' }
   $PopupEls.UpdBtn.IsEnabled = -not $busy
-  if ($script:update -and $busy) { $PopupEls.UpdNotes.Text = "$($script:updMsg)"; $PopupEls.UpdNotes.Visibility = 'Visible' }
+  if ($script:update) {
+    $PopupEls.UpdTitle.Text = if ($busy) { "$($script:updMsg)" } else { "v$($script:update.version) is ready" }
+    $PopupEls.UpdBox.ToolTip = if ($script:update.notes) { "What's new in v$($script:update.version)`n$($script:update.notes)" } else { $null }
+  }
 }
 
 function Invoke-UpdateNow {
@@ -599,6 +777,7 @@ function Step-Download {
 
 function Exit-Widget {
   $script:exiting = $true
+  Flush-UiConfig
   try { $settings.Close() } catch {}
   try { $popup.Close() } catch {}
   $widget.Close()
@@ -640,11 +819,20 @@ foreach ($n in 'Root', 'Scale', 'Groups') { $WidgetEls[$n] = $widget.FindName($n
 # Size presets. Everything the taskbar draws derives from the active one (Set-SizePreset), so a ring, its text
 # and the widget's height stay in proportion; the widget's height is ring + 2 x pad and is scaled down to fit a short taskbar.
 $SizePresets = @{
-  compact = @{ dip = 32; thick = 4;   inner = 19; innerThick = 2.5; inFont = 11.5; nextFont = 11; pad = 4; rows = 1 }
-  normal  = @{ dip = 36; thick = 4.5; inner = 21; innerThick = 3;   inFont = 13;   nextFont = 12; pad = 3; rows = 1 }
-  large   = @{ dip = 40; thick = 5;   inner = 24; innerThick = 3;   inFont = 14;   nextFont = 13; pad = 2; rows = 2 }
+  compact = @{ dip = 28; thick = 3.5; inner = 17; innerThick = 2.2; inFont = 10.5; nextFont = 11; pad = 4; rows = 1 }
+  normal  = @{ dip = 32; thick = 4;   inner = 19; innerThick = 2.5; inFont = 12;   nextFont = 12; pad = 4; rows = 1 }
+  large   = @{ dip = 38; thick = 4.5; inner = 22; innerThick = 3;   inFont = 13;   nextFont = 13; pad = 3; rows = 2 }
 }
-function Get-SizeKey { $k = "$($script:config.size)"; if ($SizePresets.ContainsKey($k)) { $k } else { 'compact' } }
+# The Look (minimal / balanced / detailed, or custom) decides size, inside, next and names; custom reads the config's own values.
+function Get-LookKey { $k = "$($script:config.look)"; if ($k -in 'minimal', 'balanced', 'detailed', 'custom') { $k } else { 'balanced' } }
+function Get-LookValue([string]$key) {
+  $lk = Get-LookKey
+  if ($lk -ne 'custom') { return $LookPresets[$lk][$key] }
+  $v = "$($script:config.$key)"
+  if ($v) { return $v }
+  return $LookPresets.balanced[$key]
+}
+function Get-SizeKey { $k = Get-LookValue 'size'; if ($SizePresets.ContainsKey($k)) { $k } else { 'normal' } }
 function Set-SizePreset {
   $p = $SizePresets[(Get-SizeKey)]
   $script:RingDip = $p.dip; $script:RingThick = $p.thick; $script:RingInnerDip = $p.inner; $script:RingInnerThick = $p.innerThick
@@ -653,6 +841,15 @@ function Set-SizePreset {
   $script:ShowReset = (Get-SizeKey) -ne 'compact'
   $sp = $SpacingPresets[(Get-SpacingKey)]
   $script:GapSide = $sp.side; $script:GapRing = $sp.ring
+  if ((Get-LookKey) -eq 'minimal') { $script:GapSide = 8; $script:GapRing = 8 }
+}
+# Touching any individual option switches to Look: custom, keeping what the current Look shows.
+function Set-LookOption([string]$key, $value) {
+  if ((Get-LookKey) -ne 'custom') {
+    foreach ($k in 'size', 'inside', 'next', 'names') { $script:config | Add-Member -Force -NotePropertyName $k -NotePropertyValue (Get-LookValue $k) }
+    $script:config | Add-Member -Force -NotePropertyName look -NotePropertyValue 'custom'
+  }
+  $script:config | Add-Member -Force -NotePropertyName $key -NotePropertyValue $value
 }
 # Space between account groups (each side of the divider) and between the rings of one account.
 $SpacingPresets = @{ tight = @{ side = 5; ring = 6 }; normal = @{ side = 14; ring = 14 }; wide = @{ side = 26; ring = 22 } }
@@ -660,12 +857,7 @@ function Get-SpacingKey { $k = "$($script:config.spacing)"; if ($SpacingPresets.
 Set-SizePreset
 
 # Where the account name goes: left of its rings, right of them, or nowhere (older configs: showNames).
-function Get-NamesMode {
-  $v = "$($script:config.names)"
-  if ($v -in 'left', 'right', 'hidden') { return $v }
-  if ($script:config.showNames -eq $false) { return 'hidden' }
-  return 'left'
-}
+function Get-NamesMode { $v = Get-LookValue 'names'; if ($v -in 'left', 'right', 'hidden') { $v } else { 'hidden' } }
 # Which limit is the inner ring of a combined dial: the account's own choice, else the global one, else 5h.
 function Get-PieKey($cfg) {
   foreach ($v in "$($cfg.pie)", "$($script:config.innerWindow)") { if ($v -in '5h', '7d') { return $v } }
@@ -674,18 +866,8 @@ function Get-PieKey($cfg) {
 
 # What goes inside a ring (none | initials | percent) and next to it (none | caption | percent). Configs from before
 # these choices existed map from the old switches: percentages on = number inside + caption beside, off = initials only.
-function Get-InsideMode {
-  $v = "$($script:config.inside)"
-  if ($v -in 'none', 'initials', 'percent') { return $v }
-  if ($script:config.showPercents -eq $false) { return 'initials' }
-  return 'percent'
-}
-function Get-NextMode {
-  $v = "$($script:config.next)"
-  if ($v -in 'none', 'caption', 'percent', 'resetin', 'resetat') { return $v }
-  if ($script:config.showPercents -eq $false -or $script:config.showCaptions -eq $false) { return 'none' }
-  return 'caption'
-}
+function Get-InsideMode { $v = Get-LookValue 'inside'; if ($v -in 'none', 'initials', 'percent') { $v } else { 'initials' } }
+function Get-NextMode { $v = Get-LookValue 'next'; if ($v -in 'none', 'caption', 'percent', 'usage', 'resetin', 'resetat') { $v } else { 'usage' } }
 
 # The arc is drawn with flat caps and ends exactly at pct x 360 degrees. (Round caps stick out half a stroke
 # width past both ends, which closed the gap: 91% looked like 95%. Measured with -RingCheck.)
@@ -724,7 +906,7 @@ function Get-InsideText($pct, [string]$short) {
   }
 }
 function Get-InsideSize([string]$short) {
-  if ((Get-InsideMode) -eq 'initials' -and $short.Length -eq 1) { return $InFont + 1.5 }
+  if ((Get-InsideMode) -eq 'initials' -and $short.Length -gt 1) { return $InFont - 1 }
   return $InFont
 }
 
@@ -759,11 +941,11 @@ function Get-NextText([string]$mode, $pct, [string]$caption, $reset) {
 # reset time on a second row under a caption or percentage.
 function Get-NextXaml($pct, [string]$caption, $reset) {
   $nx = Get-NextMode
-  if ($nx -eq 'none') { return '' }
+  if ($nx -in 'none', 'usage') { return '' }   # usage: one text block per account (Get-UsageTextXaml), not one per ring
   $main = Get-NextText $nx $pct $caption $reset
   $weight = if ($nx -eq 'percent') { 'Bold' } else { 'SemiBold' }
   $opacity = if ($nx -in 'percent', 'resetin', 'resetat') { 1 } else { 0.8 }
-  $r = if ($script:TwoRows -and $nx -in 'caption', 'percent') { Format-Reset $reset } else { '' }
+  $r = if ($script:TwoRows -and $nx -in 'caption', 'percent') { Get-Reset $reset } else { '' }
   $second = if ($r) { "<TextBlock Text=`"$(Esc $r)`" FontSize=`"$($NextFont - 2)`" Foreground=`"$($Theme.sub)`"/>" } else { '' }
   return "<StackPanel VerticalAlignment=`"Center`" Margin=`"6,0,0,1`"><TextBlock Text=`"$(Esc $main)`" FontSize=`"$NextFont`" FontWeight=`"$weight`" Foreground=`"$($Theme.fg)`" Opacity=`"$opacity`"/>$second</StackPanel>"
 }
@@ -772,8 +954,80 @@ function Get-NextXaml($pct, [string]$caption, $reset) {
 function Get-RingTip($cfg, [string]$key, $w, [string]$place = '') {
   if (-not $cfg) { return '' }
   $pct = if ($w -and $null -ne $w.pct) { "$(Format-Pct $w.pct)%" } else { $DASH }
-  $rs = if ($w) { Format-Reset $w.reset } else { '' }
-  return "$(Get-Label $cfg)`n$(Get-Caption $key)  $pct$(if ($place) { "  ($place)" })$(if ($rs) { "`nresets $rs" })"
+  $rs = if ($w) { Get-ResetLong $w.reset } else { '' }
+  return "$(Get-Label $cfg)`n$(Get-Caption $key)  $pct$(if ($place) { "  ($place)" })$(if ($rs) { "`n$rs" })"
+}
+
+# The tightest window an account shows: highest % of its shown windows, Fable left out unless nothing else is shown.
+# 'many' says the account draws more than one window, so the text beside it names the one it reports.
+function Get-Tightest($cfg, $res) {
+  $keys = @(Get-ShownLimits $cfg $res)
+  if ($cfg.style -eq 'combined' -and -not (Test-NoFiveH $res)) { $keys = @('5h', '7d') }
+  $cand = @($keys | Where-Object { $_ -ne 'fable' })
+  if (-not $cand.Count) { $cand = $keys }
+  $best = $null; $bk = $cand[0]
+  foreach ($k in $cand) {
+    $w = Get-Win $res $k
+    if ($w -and $null -ne $w.pct -and (-not $best -or $w.pct -gt $best.pct)) { $best = $w; $bk = $k }
+  }
+  if (-not $best) { $best = Get-Win $res $bk }
+  return [pscustomobject]@{ key = $bk; win = $best; many = ($keys.Count -gt 1) }
+}
+
+# Next to an account's ring(s) in the Usage look: "14%" over "W 12pm" (with the window's caption when the account has
+# several: "5h 64%" over "in 37m"). With $name (the Detailed look) it reads "XNDR" over "14% . W 12pm".
+function Get-UsageTextXaml($cfg, $res, [string]$name = '') {
+  $t = Get-Tightest $cfg $res
+  $w = $t.win
+  $pct = if ($w -and $null -ne $w.pct) { "$(Format-Pct $w.pct)%" } elseif ($script:job) { $ELL } else { $DASH }
+  $rs = if ($w) { Get-Reset $w.reset } else { '' }
+  $soon = $false
+  if ($w -and $w.reset) { $left = (ConvertTo-LocalTime $w.reset) - (Get-Date); $soon = $left.TotalMinutes -gt 0 -and $left.TotalMinutes -lt 60 }
+  $f2 = $NextFont - 1
+  if ($name) {
+    $l1 = "<TextBlock Text=`"$(Esc $name)`" FontSize=`"$NextFont`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`" TextTrimming=`"CharacterEllipsis`" MaxWidth=`"110`"/>"
+    $l2 = "<TextBlock FontSize=`"$f2`" Foreground=`"$($Theme.sub)`"><Run Text=`"$(Esc $pct)`"/><Run Text=`"$(Esc $(if ($rs) { " $DOT " }))`"/><Run Text=`"$(Esc $rs)`" Foreground=`"$(if ($soon) { $Theme.fg } else { $Theme.sub })`"/></TextBlock>"
+  } else {
+    $cap = if ($t.many) { "<Run Text=`"$(Esc (Get-Caption $t.key)) `" FontWeight=`"Normal`" FontSize=`"$f2`" Foreground=`"$($Theme.sub)`"/>" } else { '' }
+    $l1 = "<TextBlock FontSize=`"$NextFont`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`">$cap<Run Text=`"$(Esc $pct)`"/></TextBlock>"
+    $l2 = if ($rs) { "<TextBlock Text=`"$(Esc $rs)`" FontSize=`"$f2`" Foreground=`"$(if ($soon) { $Theme.fg } else { $Theme.sub })`"/>" } else { '' }
+  }
+  return [Windows.Markup.XamlReader]::Parse("<StackPanel $ns VerticalAlignment=`"Center`" Margin=`"7,0,0,1`">$l1$l2</StackPanel>")
+}
+
+# The at-limit group: one red full ring with the count, "At limit" over when the first account is back.
+function New-LimitGroupElement($limited) {
+  $sz = Get-RingSize
+  $backs = @($limited | ForEach-Object { Get-BackAt (Get-Result $_.name) })
+  $first = @($backs | Where-Object { $_ } | Sort-Object | Select-Object -First 1)
+  $text = ''
+  if ((Get-NextMode) -ne 'none') {
+    $b = if ($first.Count) { Get-Reset $first[0] } else { '' }
+    $line2 = ''
+    if ($b) { $line2 = "<TextBlock Text=`"$(Esc $b)`" FontSize=`"$($NextFont - 1)`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`"/>" }
+    $text = "<StackPanel VerticalAlignment=`"Center`" Margin=`"7,0,0,1`"><TextBlock Text=`"At limit`" FontSize=`"$NextFont`" Foreground=`"$($Theme.sub)`"/>$line2</StackPanel>"
+  }
+  $el = [Windows.Markup.XamlReader]::Parse(@"
+<StackPanel $ns Orientation="Horizontal" Background="#01000000">
+  <Grid Width="$sz" Height="$sz">
+    <Ellipse Stroke="$($Theme.ring)" StrokeThickness="$RingThick"/>
+    <Path Name="Arc" StrokeThickness="$RingThick"/>
+    <TextBlock Text="$(@($limited).Count)" FontSize="$InFont" FontWeight="SemiBold" Foreground="$($Theme.fg)" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,1.3"/>
+  </Grid>
+  $text
+</StackPanel>
+"@)
+  Set-Ring ($el.FindName('Arc')) 100 $sz
+  return $el
+}
+
+function Get-LimitGroupTip($limited) {
+  $lines = @("At limit ($(@($limited).Count))")
+  foreach ($c in @($limited)) {
+    $b = Get-BackAt (Get-Result $c.name)
+    $lines += "$(Get-Label $c)  $(if ($b) { 'back ' + (Get-Reset $b) } else { $DASH })"
+  }
+  return ($lines -join "`n")
 }
 
 function New-RingElement($pct, [string]$caption, [bool]$gapAfter, [string]$short, $reset, [string]$tip = '') {
@@ -783,7 +1037,7 @@ function New-RingElement($pct, [string]$caption, [bool]$gapAfter, [string]$short
   <Grid Width="$sz" Height="$sz">
     <Ellipse Stroke="$($Theme.ring)" StrokeThickness="$RingThick"/>
     <Path Name="Arc" StrokeThickness="$RingThick"/>
-    <TextBlock Text="$(Get-InsideText $pct $short)" FontSize="$(Get-InsideSize $short)" FontWeight="Bold" Foreground="$($Theme.fg)" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,1.3"/>
+    <TextBlock Text="$(Get-InsideText $pct $short)" FontSize="$(Get-InsideSize $short)" FontWeight="SemiBold" Foreground="$($Theme.fg)" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,1.3"/>
   </Grid>
   $(Get-NextXaml $pct $caption $reset)
 </StackPanel>
@@ -818,13 +1072,13 @@ function New-CombinedElement($cfg, $res, [string]$short) {
   $ringKey = if ($pieKey -eq '5h') { '7d' } else { '5h' }
   $nx = Get-NextMode
   $lines = ''
-  if ($nx -ne 'none' -or $script:ShowReset) {
+  if ($nx -ne 'usage' -and ($nx -ne 'none' -or $script:ShowReset)) {
     $lines = '<StackPanel VerticalAlignment="Center" Margin="7,0,0,0">' + (@(foreach ($k in '5h', '7d') {
       $w = Get-Win $res $k
       $main = if ($nx -eq 'none') { '' } else { Get-NextText $nx $w.pct (Get-Caption $k) $w.reset }
       $color = Get-UsageColor $w.pct
       $mark = if ($k -eq $pieKey) { "<Ellipse Width=`"8`" Height=`"8`" Fill=`"$color`"/>" } else { "<Ellipse Width=`"8`" Height=`"8`" Stroke=`"$color`" StrokeThickness=`"1.8`"/>" }
-      $r = if ($script:ShowReset -and $nx -notin 'resetin', 'resetat') { Format-Reset $w.reset } else { '' }
+      $r = if ($script:ShowReset -and $nx -notin 'resetin', 'resetat') { Get-Reset $w.reset } else { '' }
       $reset = if ($r) { "<Run Text=`"$(if ($main) { '  ' })$(Esc $r)`" Foreground=`"$($Theme.sub)`" FontSize=`"$($NextFont - 1.5)`"/>" } else { '' }
       "<StackPanel Orientation=`"Horizontal`"><Grid Width=`"9`" Height=`"9`" VerticalAlignment=`"Center`" Margin=`"0,1,5,0`">$mark</Grid><TextBlock FontSize=`"$NextFont`"><Run Text=`"$(Esc $main)`" FontWeight=`"Bold`" Foreground=`"$($Theme.fg)`"/>$reset</TextBlock></StackPanel>"
     }) -join '') + '</StackPanel>'
@@ -847,7 +1101,7 @@ function New-CombinedElement($cfg, $res, [string]$short) {
     <Path Name="Arc" StrokeThickness="$RingThick"/>
     <Ellipse Width="$in" Height="$in" Stroke="$($Theme.ring)" StrokeThickness="$RingInnerThick" HorizontalAlignment="Center" VerticalAlignment="Center"/>
     <Path Name="Inner" Width="$in" Height="$in" StrokeThickness="$RingInnerThick" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-    <TextBlock Text="$(Esc $text)" FontSize="$(if ($text.Length -eq 1) { $InFont - 1 } else { $InFont - 2 })" FontWeight="Bold" Foreground="$($Theme.fg)" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,1.2"/>
+    <TextBlock Text="$(Esc $text)" FontSize="$([Math]::Max(7.5, $InFont - 3))" FontWeight="SemiBold" Foreground="$($Theme.fg)" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,1.2"/>
   </Grid>
 "@
   }
@@ -878,7 +1132,7 @@ function Get-AccountTip($cfg, $res) {
     }
     foreach ($k in $LimitKeys) {
       $w = Get-Win $res $k
-      if ($w -and $null -ne $w.pct) { $tip += "$(Get-Caption $k)  $(Format-Pct $w.pct)%$(if ($places[$k]) { "  ($($places[$k]))" })  $DOT  resets $(Format-Reset $w.reset)" }
+      if ($w -and $null -ne $w.pct) { $tip += "$(Get-Caption $k)  $(Format-Pct $w.pct)%$(if ($places[$k]) { "  ($($places[$k]))" })$(if ($w.reset) { "  $DOT  $(Get-ResetLong $w.reset)" })" }
     }
     $tip += "Green under 70% $DOT amber from 70% $DOT red from 90%"
     if ($res.error) { $tip += $res.error }
@@ -892,6 +1146,7 @@ function Get-AccountTip($cfg, $res) {
 }
 
 function Get-AccountTipFor($name) {
+  if ($name -eq '__limit__') { return (Get-LimitGroupTip @(Get-LimitedCfgs)) }
   if (-not $name) { return $(if ($script:job) { "Looking for accounts$ELL" } else { (Get-AccountTip $null $null) + "`nNo accounts yet: right-click > Scan for accounts" }) }
   return (Get-AccountTip (Get-AcctCfg $name) (Get-Result $name))
 }
@@ -899,50 +1154,58 @@ function Get-AccountTipFor($name) {
 # Everything that changes how the rings look. When it is the same as last time the rings are left alone
 # (rebuilding them every time is what made the widget flash on click and close); only the tooltips are refreshed.
 $script:widgetSig = $null
-function Get-WidgetSig($cfgs) {
+function Get-WidgetSig($cfgs, $lim = @()) {
   $dpi = 1.0
   try { $dpi = [Windows.Media.VisualTreeHelper]::GetDpi($widget).DpiScaleX } catch {}
   $parts = @(($script:config | ConvertTo-Json -Depth 6 -Compress), "$dpi", "$([bool]$script:job)", "$($widget.IsLoaded)", "$(@($script:newAccts | ForEach-Object name) -join ',')", (Get-Shorts | ConvertTo-Json -Compress), "shown:$(@($cfgs | ForEach-Object name) -join ',')")
+  $parts += "look:$(Get-LookKey)|show5h:$($script:config.show5h)|atLimit:$(Get-AtLimitMode)|time:$(Get-TimeFormat)"
+  $reset = $script:TwoRows -or $script:ShowReset -or (Get-NextMode) -in 'resetin', 'resetat', 'usage'
   foreach ($cfg in $cfgs) {
     $res = Get-Result $cfg.name
     $parts += "no5h:$(Test-NoFiveH $res)"
     $parts += ($LimitKeys | ForEach-Object { "$((Get-Win $res $_).pct)" }) -join '/'
-    if ($script:TwoRows -or $script:ShowReset -or (Get-NextMode) -in 'resetin', 'resetat') { $parts += ($LimitKeys | ForEach-Object { Format-Reset (Get-Win $res $_).reset }) -join '/' }
+    if ($reset) { $parts += ($LimitKeys | ForEach-Object { Get-Reset (Get-Win $res $_).reset }) -join '/' }
+  }
+  if (@($lim).Count) {
+    $parts += "limited:$(@($lim | ForEach-Object name) -join ',')"
+    $parts += "back:$(@($lim | ForEach-Object { $b = Get-BackAt (Get-Result $_.name); if ($b) { Get-Reset $b } }) -join ',')"
   }
   return ($parts -join '|')
 }
 
-function Update-Widget {
-  Set-SizePreset
-  $cfgs = @(Get-ShownCfgs)
-  $sig = Get-WidgetSig $cfgs
-  if ($sig -eq $script:widgetSig -and $WidgetEls.Groups.Children.Count) {
-    foreach ($g in $WidgetEls.Groups.Children) { if ($g -is [Windows.Controls.StackPanel]) { $g.ToolTip = Get-AccountTipFor $g.Tag } }
-    if ($widget.IsLoaded) { Set-WidgetPosition }
-    return
-  }
-  $script:widgetSig = $sig
-  $WidgetEls.Groups.Children.Clear()
-  $WidgetEls.Root.Padding = "8,$PadV"
-  if (-not $cfgs.Count) {
+# Fills a StackPanel with the account items: the taskbar widget's own panel, and the Settings preview at 1:1.
+function Build-WidgetGroups($panel, $cfgs, $lim) {
+  $panel.Children.Clear()
+  $items = @($cfgs) + $(if (@($lim).Count) { ,'__limit__' })
+  if (-not $items.Count) {
     $g = New-Object Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; Background = '#01000000' }
     [void]$g.Children.Add((New-RingElement $null (Get-Caption '5h') $true))
     [void]$g.Children.Add((New-RingElement $null (Get-Caption '7d') $false))
     $g.ToolTip = Get-AccountTipFor $null
-    [void]$WidgetEls.Groups.Children.Add($g)
+    [void]$panel.Children.Add($g)
   }
   $shorts = Get-Shorts
   $dividers = $script:config.showDividers -eq $true
-  for ($i = 0; $i -lt $cfgs.Count; $i++) {
-    $cfg = $cfgs[$i]; $res = Get-Result $cfg.name
-    $g = New-Object Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; Background = '#01000000'; Tag = $cfg.name }
+  $nameMode = Get-NamesMode
+  $usage = (Get-NextMode) -eq 'usage'
+  for ($i = 0; $i -lt $items.Count; $i++) {
+    $cfg = $items[$i]; $isGroup = $cfg -is [string]
+    $g = New-Object Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; Background = '#01000000'; Tag = $(if ($isGroup) { '__limit__' } else { $cfg.name }) }
     if ($i -gt 0) {
       # Same width with or without the line, so switching it on or off moves nothing.
       [void]$g.Children.Add((New-Object Windows.Controls.Border -Property @{ Width = 1; Height = $RingDip - 8; Background = $(if ($dividers) { $Theme.ring } else { 'Transparent' }); Margin = "$GapSide,0,$GapSide,0" }))
     }
-    $nameMode = Get-NamesMode
+    if ($isGroup) {
+      [void]$g.Children.Add((New-LimitGroupElement $lim))
+      $g.ToolTip = Get-LimitGroupTip $lim
+      [void]$panel.Children.Add($g)
+      continue
+    }
+    $res = Get-Result $cfg.name
+    # In the Usage look a name on the left is part of the text block ("XNDR" over "14% . W 12pm"), not a separate label.
+    $inline = $usage -and $nameMode -eq 'left'
     $nameEl = $null
-    if ($nameMode -ne 'hidden') {
+    if ($nameMode -ne 'hidden' -and -not $inline) {
       $nameEl = New-Object Windows.Controls.TextBlock -Property @{
         Text = (Get-Label $cfg); FontSize = $NextFont + 0.5; FontWeight = 'SemiBold'; Foreground = $Theme.fg; Opacity = 0.9; MaxWidth = 110
         TextTrimming = 'CharacterEllipsis'; VerticalAlignment = 'Center'; Margin = $(if ($nameMode -eq 'left') { '0,0,8,1.2' } else { '8,0,0,1.2' })
@@ -958,10 +1221,25 @@ function Update-Widget {
         [void]$g.Children.Add((New-RingElement $w.pct (Get-Caption $keys[$k]) ($k -lt $keys.Count - 1) $shorts[$cfg.name] $w.reset (Get-RingTip $cfg $keys[$k] $w)))
       }
     }
+    if ($usage) { [void]$g.Children.Add((Get-UsageTextXaml $cfg $res $(if ($inline) { Get-Label $cfg } else { '' }))) }
     if ($nameEl -and $nameMode -eq 'right') { [void]$g.Children.Add($nameEl) }
     $g.ToolTip = Get-AccountTipFor $cfg.name
-    [void]$WidgetEls.Groups.Children.Add($g)
+    [void]$panel.Children.Add($g)
   }
+}
+
+function Update-Widget {
+  Set-SizePreset
+  $cfgs = @(Get-ShownCfgs); $lim = @(Get-LimitedCfgs)
+  $sig = Get-WidgetSig $cfgs $lim
+  if ($sig -eq $script:widgetSig -and $WidgetEls.Groups.Children.Count) {
+    foreach ($g in $WidgetEls.Groups.Children) { if ($g -is [Windows.Controls.StackPanel]) { $g.ToolTip = Get-AccountTipFor $g.Tag } }
+    if ($widget.IsLoaded) { Set-WidgetPosition }
+    return
+  }
+  $script:widgetSig = $sig
+  Build-WidgetGroups $WidgetEls.Groups $cfgs $lim
+  $WidgetEls.Root.Padding = "8,$PadV"
   if ($script:newAccts.Count) {
     [void]$WidgetEls.Groups.Children.Add((New-Object Windows.Shapes.Ellipse -Property @{
       Width = 7; Height = 7; Fill = $Colors.accent; VerticalAlignment = 'Top'; Margin = '4,0,0,0'
@@ -970,6 +1248,15 @@ function Update-Widget {
   }
   $WidgetEls.Root.Opacity = if ($script:job) { 0.6 } else { 1.0 }
   if ($widget.IsLoaded) { Set-WidgetPosition }
+  Update-Preview
+}
+
+# The Settings > Taskbar preview: the same renderer, drawn at 1:1 on a taskbar-coloured box.
+function Update-Preview {
+  $p = $PopupEls.PrevGroups
+  if (-not $p) { return }
+  if (-not $settings.IsVisible -and -not $script:previewForce) { return }
+  Build-WidgetGroups $p @(Get-ShownCfgs) @(Get-LimitedCfgs)
 }
 
 # Sit on the primary screen's taskbar, vertically centred in it; the right edge stays put as rings come and go.
@@ -1001,7 +1288,7 @@ function Set-WidgetPosition {
         Title="Claude usage" WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize" Width="396" Height="600" Opacity="0"
         UseLayoutRounding="True" FontFamily="Segoe UI Variable Text, Segoe UI">
-  <Border x:Name="Card" Background="$($Theme.card)" BorderBrush="$($Theme.border)" BorderThickness="1" CornerRadius="10" Padding="8" Margin="8" VerticalAlignment="Bottom">
+  <Border x:Name="Card" Background="$($Theme.card)" BorderBrush="$($Theme.border)" BorderThickness="1" CornerRadius="8" Padding="12,6,10,10" Margin="12,12,12,12" VerticalAlignment="Bottom">
     <Border.RenderTransform><TranslateTransform x:Name="Slide"/></Border.RenderTransform>
     <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="3" Opacity="0.35"/></Border.Effect>
     <Border.Resources>
@@ -1071,8 +1358,8 @@ function Set-WidgetPosition {
         <Setter Property="Template">
           <Setter.Value>
             <ControlTemplate TargetType="Button">
-              <Border x:Name="Bg" Background="Transparent" CornerRadius="5" Padding="8,6">
-                <ContentPresenter TextElement.FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" TextElement.FontSize="13" TextElement.Foreground="$($Theme.fg)"/>
+              <Border x:Name="Bg" Background="Transparent" CornerRadius="5" Width="32" Height="32">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" TextElement.FontSize="14" TextElement.Foreground="$($Theme.fg)"/>
               </Border>
               <ControlTemplate.Triggers>
                 <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bg" Property="Background" Value="$($Theme.hover)"/></Trigger>
@@ -1146,146 +1433,355 @@ function Set-WidgetPosition {
           </Setter.Value>
         </Setter>
       </Style>
+      <Style TargetType="ScrollBar">
+        <Setter Property="Width" Value="10"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="ScrollBar">
+              <Grid Background="Transparent">
+                <Track x:Name="PART_Track" IsDirectionReversed="True">
+                  <Track.DecreaseRepeatButton><RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False"/></Track.DecreaseRepeatButton>
+                  <Track.IncreaseRepeatButton><RepeatButton Command="ScrollBar.PageDownCommand" Opacity="0" Focusable="False"/></Track.IncreaseRepeatButton>
+                  <Track.Thumb>
+                    <Thumb>
+                      <Thumb.Template><ControlTemplate TargetType="Thumb"><Border Margin="2,0" CornerRadius="3" Background="$($Theme.sub)" Opacity="0.55"/></ControlTemplate></Thumb.Template>
+                    </Thumb>
+                  </Track.Thumb>
+                </Track>
+              </Grid>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="Switch" TargetType="ToggleButton">
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="ToggleButton">
+              <Grid Width="40" Height="20" Background="Transparent">
+                <Border x:Name="Track" CornerRadius="10" Background="Transparent" BorderBrush="$($Theme.sub)" BorderThickness="1"/>
+                <Ellipse x:Name="Thumb" Width="12" Height="12" Fill="$($Theme.sub)" HorizontalAlignment="Left" Margin="4,0,0,0"/>
+              </Grid>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="Track" Property="Background" Value="$($Colors.accent)"/>
+                  <Setter TargetName="Track" Property="BorderBrush" Value="$($Colors.accent)"/>
+                  <Setter TargetName="Thumb" Property="Fill" Value="White"/>
+                  <Setter TargetName="Thumb" Property="HorizontalAlignment" Value="Right"/>
+                  <Setter TargetName="Thumb" Property="Margin" Value="0,0,4,0"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="Combo" TargetType="ComboBox">
+        <Setter Property="Foreground" Value="$($Theme.fg)"/>
+        <Setter Property="FontSize" Value="12.5"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="ComboBox">
+              <Grid MinWidth="132">
+                <ToggleButton x:Name="TB" Focusable="False" ClickMode="Press" IsChecked="{Binding Path=IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                    <ControlTemplate TargetType="ToggleButton">
+                      <Border x:Name="Bd" Background="$($Theme.field)" BorderBrush="$($Theme.border)" BorderThickness="1" CornerRadius="5">
+                        <TextBlock Text="&#xE70D;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="10" Foreground="$($Theme.sub)" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                      </Border>
+                      <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="BorderBrush" Value="$($Theme.sub)"/></Trigger>
+                      </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                  </ToggleButton.Template>
+                </ToggleButton>
+                <ContentPresenter IsHitTestVisible="False" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" Margin="10,6,30,6" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="None">
+                  <Border MinWidth="{Binding ActualWidth, ElementName=TB}" Background="$($Theme.card)" BorderBrush="$($Theme.border)" BorderThickness="1" CornerRadius="6" Padding="3" Margin="0,3,0,0">
+                    <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto"><StackPanel IsItemsHost="True"/></ScrollViewer>
+                  </Border>
+                </Popup>
+              </Grid>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+        <Style.Resources>
+          <Style TargetType="ComboBoxItem">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="$($Theme.fg)"/>
+            <Setter Property="Template">
+              <Setter.Value>
+                <ControlTemplate TargetType="ComboBoxItem">
+                  <Border x:Name="Bd" CornerRadius="4" Padding="8,5" Background="Transparent"><ContentPresenter/></Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="$($Theme.hover)"/></Trigger>
+                    <Trigger Property="IsSelected" Value="True"><Setter TargetName="Bd" Property="Background" Value="$($Theme.nav)"/></Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </Setter.Value>
+            </Setter>
+          </Style>
+        </Style.Resources>
+      </Style>
+      <Style x:Key="NavItem" TargetType="RadioButton">
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Foreground" Value="$($Theme.fg)"/>
+        <Setter Property="FontSize" Value="13.5"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="RadioButton">
+              <Grid Height="38" Margin="0,1" Background="Transparent">
+                <Border x:Name="Bd" Background="Transparent" CornerRadius="5"/>
+                <Border x:Name="Pill" Width="3" Height="16" CornerRadius="2" Background="$($Colors.accent)" HorizontalAlignment="Left" Visibility="Collapsed"/>
+                <ContentPresenter Margin="14,0,0,0" VerticalAlignment="Center"/>
+              </Grid>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="$($Theme.chip)"/></Trigger>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="Bd" Property="Background" Value="$($Theme.nav)"/>
+                  <Setter TargetName="Pill" Property="Visibility" Value="Visible"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="Tile" TargetType="RadioButton">
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Foreground" Value="$($Theme.fg)"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="RadioButton">
+              <Border x:Name="Bd" Background="$($Theme.row)" BorderBrush="$($Theme.rowline)" BorderThickness="1" CornerRadius="6" Padding="14,12" Margin="0,0,10,0">
+                <ContentPresenter/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="BorderBrush" Value="$($Theme.sub)"/></Trigger>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="Bd" Property="BorderBrush" Value="$($Colors.accent)"/>
+                  <Setter TargetName="Bd" Property="BorderThickness" Value="2"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+      <Style x:Key="LinkBtn" TargetType="Button">
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <TextBlock x:Name="T" Text="{TemplateBinding Content}" FontSize="12" FontWeight="SemiBold" Foreground="$($Colors.accent)" Padding="8,4"/>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="T" Property="TextDecorations" Value="Underline"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter TargetName="T" Property="Opacity" Value="0.5"/></Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
     </Border.Resources>
     <StackPanel>
-      <DockPanel Margin="8,4,2,6">
-        <Button x:Name="RefreshBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Content="&#xE72C;" VerticalAlignment="Top"/>
+      <DockPanel Margin="4,4,0,2">
         <Button x:Name="EditBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Content="&#xE713;" ToolTip="Settings" VerticalAlignment="Top"/>
+        <Button x:Name="RefreshBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Content="&#xE72C;" VerticalAlignment="Top"/>
         <StackPanel>
           <TextBlock x:Name="Title" Text="Claude usage" FontSize="14" FontWeight="SemiBold" Foreground="$($Theme.fg)"/>
           <TextBlock x:Name="Status" FontSize="11" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,1,0,0"/>
         </StackPanel>
       </DockPanel>
-      <Border x:Name="UpdBox" Visibility="Collapsed" Background="$($Theme.hover)" BorderBrush="$($Colors.accent)" BorderThickness="1" CornerRadius="6" Padding="10,8" Margin="2,0,2,6">
+      <Border x:Name="UpdBox" Visibility="Collapsed" Padding="4,0,0,0" Margin="0,2,0,2">
         <DockPanel>
-          <Button x:Name="UpdBtn" DockPanel.Dock="Right" Style="{StaticResource AccentBtn}" Content="Update now" VerticalAlignment="Top"/>
-          <StackPanel>
-            <TextBlock x:Name="UpdTitle" FontSize="12" FontWeight="SemiBold" Foreground="$($Colors.accent)" TextWrapping="Wrap"/>
-            <TextBlock x:Name="UpdNotes" FontSize="11" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,3,0,0"/>
-          </StackPanel>
+          <Button x:Name="UpdBtn" DockPanel.Dock="Right" Style="{StaticResource LinkBtn}" Content="Update"/>
+          <TextBlock x:Name="UpdTitle" FontSize="12" Foreground="$($Theme.fg)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
         </DockPanel>
       </Border>
       <StackPanel x:Name="NewAcctBox"/>
+      <StackPanel x:Name="Summary" Orientation="Horizontal" Margin="4,8,4,6"/>
       <StackPanel x:Name="List"/>
-      <TextBlock x:Name="Legend" FontSize="10.5" Foreground="$($Theme.sub)" Margin="10,8,10,0" TextWrapping="Wrap"/>
-      <TextBlock x:Name="Footer" FontSize="10.5" Foreground="$($Theme.sub)" Margin="10,8,10,2" TextWrapping="Wrap"/>
+      <StackPanel x:Name="LimitedBox"/>
+      <TextBlock x:Name="Footer" FontSize="10.5" Foreground="$($Theme.sub)" Margin="4,8,4,2" TextWrapping="Wrap"/>
     </StackPanel>
   </Border>
 </Window>
 "@
 $popup = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $popupXaml))
 $PopupEls = @{}
-foreach ($n in 'Card', 'Slide', 'RefreshBtn', 'EditBtn', 'Title', 'Status', 'List', 'Legend', 'Footer', 'UpdBox', 'UpdBtn', 'UpdTitle', 'UpdNotes', 'NewAcctBox') { $PopupEls[$n] = $popup.FindName($n) }
+foreach ($n in 'Card', 'Slide', 'RefreshBtn', 'EditBtn', 'Title', 'Status', 'List', 'Summary', 'LimitedBox', 'Footer', 'UpdBox', 'UpdBtn', 'UpdTitle', 'NewAcctBox') { $PopupEls[$n] = $popup.FindName($n) }
 
 # ---------------------------------------------------------------- settings window
-# A normal, resizable window (title bar, minimum size, OK / Cancel / Apply). Its size is fixed by the user, never by
-# the tab shown: the tab panels sit in a scroll area, so switching tabs cannot move or resize anything.
-# Edits preview live on the taskbar; OK or Apply keeps them, Cancel (or Esc, or the close button) undoes them.
+# A Win 11 style window: a left nav (Taskbar, Usage list, Accounts, General) and one page at a time on the right. The
+# window keeps its size whatever the page (pages sit in a scroll area). Every change applies at once: the config is
+# written 400 ms after the last edit (Save-UiConfig), so there is no OK / Cancel / Apply.
+
+$FontIcons = 'Segoe Fluent Icons, Segoe MDL2 Assets'
+
+# One settings row: icon, title, a sub line (named when the code rewrites it) and controls on the right.
+function New-SettingXaml([string]$icon, [string]$title, [string]$sub, [string]$right, [string]$subName = '') {
+  $nm = if ($subName) { "x:Name=`"$subName`" " } else { '' }
+@"
+<Border Background="$($Theme.row)" BorderBrush="$($Theme.rowline)" BorderThickness="1" CornerRadius="6" Padding="16,12" Margin="0,0,0,6">
+  <DockPanel>
+    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">$right</StackPanel>
+    <TextBlock DockPanel.Dock="Left" Text="$icon" FontFamily="$FontIcons" FontSize="18" Width="40" VerticalAlignment="Center" Foreground="$($Theme.fg)"/>
+    <StackPanel VerticalAlignment="Center">
+      <TextBlock Text="$title" FontSize="13.5" Foreground="$($Theme.fg)"/>
+      <TextBlock $nm Text="$sub" FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,2,0,0"/>
+    </StackPanel>
+  </DockPanel>
+</Border>
+"@
+}
+
+# A row whose choices are a segmented button strip: radio buttons named <prefix>_<value> (Set-Seg in code reads them).
+function New-OptXaml([string]$title, [string]$sub, [string]$prefix, [string[]]$specs) {
+  $btns = ($specs | ForEach-Object { $v, $l = $_ -split ':', 2; "<RadioButton x:Name=`"$($prefix)_$v`" Style=`"{DynamicResource Seg}`" GroupName=`"$prefix`" Content=`"$l`" FontSize=`"12.5`" Margin=`"0,0,4,4`"/>" }) -join ''
+@"
+<Border Background="$($Theme.row)" BorderBrush="$($Theme.rowline)" BorderThickness="1" CornerRadius="6" Padding="16,12,16,8" Margin="0,0,0,6">
+  <StackPanel>
+    <TextBlock Text="$title" FontSize="13.5" Foreground="$($Theme.fg)"/>
+    <TextBlock Text="$sub" FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,2,0,8"/>
+    <WrapPanel>$btns</WrapPanel>
+  </StackPanel>
+</Border>
+"@
+}
+
+# A folded section: a header row that opens and closes its body.
+function New-FoldXaml([string]$name, [string]$icon, [string]$title, [string]$sub, [string]$body) {
+@"
+<Border x:Name="$($name)Head" Background="$($Theme.row)" BorderBrush="$($Theme.rowline)" BorderThickness="1" CornerRadius="6" Padding="16,12" Margin="0,0,0,6" Cursor="Hand">
+  <DockPanel Background="Transparent">
+    <TextBlock x:Name="$($name)Chev" DockPanel.Dock="Right" Text="&#xE70D;" FontFamily="$FontIcons" FontSize="12" VerticalAlignment="Center" Foreground="$($Theme.sub)"/>
+    <TextBlock DockPanel.Dock="Left" Text="$icon" FontFamily="$FontIcons" FontSize="18" Width="40" VerticalAlignment="Center" Foreground="$($Theme.fg)"/>
+    <StackPanel VerticalAlignment="Center">
+      <TextBlock Text="$title" FontSize="13.5" Foreground="$($Theme.fg)"/>
+      <TextBlock Text="$sub" FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,2,0,0"/>
+    </StackPanel>
+  </DockPanel>
+</Border>
+<StackPanel x:Name="$($name)Body" Visibility="Collapsed">$body</StackPanel>
+"@
+}
+
+# The mini taskbar picture on a Look tile: bare initials rings, or one ring with two text lines.
+function New-MiniRingXaml([string]$name, [string]$letter) {
+  "<Grid Width=`"30`" Height=`"30`" Margin=`"0,0,8,0`"><Ellipse Stroke=`"$($Theme.ring)`" StrokeThickness=`"3.5`"/><Path x:Name=`"$name`" StrokeThickness=`"3.5`"/><TextBlock Text=`"$letter`" FontSize=`"10.5`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`" HorizontalAlignment=`"Center`" VerticalAlignment=`"Center`"/></Grid>"
+}
+function New-TileXaml([string]$key, [string]$title, [string]$sub, [string]$mini) {
+@"
+<RadioButton x:Name="Lk_$key" Style="{DynamicResource Tile}" GroupName="look">
+  <StackPanel>
+    <StackPanel Orientation="Horizontal" Height="34" Margin="0,0,0,12">$mini</StackPanel>
+    <TextBlock Text="$title" FontSize="14" FontWeight="SemiBold" Foreground="$($Theme.fg)"/>
+    <TextBlock Text="$sub" FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap"/>
+  </StackPanel>
+</RadioButton>
+"@
+}
+function New-MiniText([string]$l1, [string]$l2) {
+  "<StackPanel VerticalAlignment=`"Center`"><TextBlock Text=`"$l1`" FontSize=`"12`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`"/><TextBlock Text=`"$l2`" FontSize=`"11`" Foreground=`"$($Theme.sub)`"/></StackPanel>"
+}
+
+function New-NavXaml([string]$key, [string]$icon, [string]$title) {
+@"
+<RadioButton x:Name="Tab_$key" Style="{DynamicResource NavItem}" GroupName="tabs">
+  <StackPanel Orientation="Horizontal">
+    <TextBlock Text="$icon" FontFamily="$FontIcons" FontSize="16" Width="22" VerticalAlignment="Center"/>
+    <TextBlock Text="$title" Margin="12,0,0,0" VerticalAlignment="Center"/>
+  </StackPanel>
+</RadioButton>
+"@
+}
+
+$sw = { param($name) "<ToggleButton x:Name=`"$name`" Style=`"{DynamicResource Switch}`"/>" }
+$cb = { param($name) "<ComboBox x:Name=`"$name`" Style=`"{DynamicResource Combo}`"/>" }
+$tbx = { param($name, $w) "<TextBox x:Name=`"$name`" Width=`"$w`" FontSize=`"13`" TextAlignment=`"Center`"/>" }
+$moreTaskbar = (New-OptXaml 'Size' 'The rings and the text next to them scale together.' 'Sz' @('compact:Compact', 'normal:Normal', 'large:Large')) +
+  (New-OptXaml 'Inside the ring' "Each account's initials are set under Accounts." 'In' @('none:Nothing', 'initials:Initials', 'percent:Percentage')) +
+  (New-OptXaml 'Beside the ring' "Usage and reset reads '14%' over 'W 12pm'. Caption is 5h / 7d (renamed under General)." 'Nx' @('none:Nothing', 'caption:Caption', 'percent:Percentage', 'usage:Usage and reset', 'resetin:Reset in', 'resetat:Reset day + time')) +
+  (New-OptXaml 'Account names' 'Left puts the name in front of the usage text in the Detailed look.' 'Nm' @('left:Left', 'right:Right', 'hidden:Hidden')) +
+  (New-OptXaml 'Spacing' "The gap between accounts and between an account's rings." 'Sp' @('tight:Tight', 'normal:Normal', 'wide:Wide')) +
+  (New-SettingXaml '&#xE7C9;' 'Dividers' 'A thin line between the accounts on the taskbar.' (& $sw 'Sw_dividers')) +
+  (New-OptXaml 'Dual ring' 'For accounts shown as one dial (set under Accounts > Rings).' 'Iw' @('5h:5h inside, 7d outside', '7d:7d inside, 5h outside'))
+$moreList = (New-SettingXaml '&#xE7B3;' 'Animations' 'Fade and slide the list in and out.' (& $sw 'Sw_anim'))
+$moreGeneral = (New-SettingXaml '&#xE8D2;' 'Rename the windows' 'The captions used beside the rings and in the list.' ((& $tbx 'Cap_5h' 56) + (& $tbx 'Cap_7d' 56) + (& $tbx 'Cap_fable' 70))) +
+  (New-SettingXaml '&#xE8A5;' 'Open the config file' 'config.json in your user profile, in Notepad.' '<Button x:Name="OpenCfgBtn" Style="{DynamicResource TextBtn}" Content="Open"/>') +
+  (New-SettingXaml '&#xE777;' 'Reset settings' 'Back to the defaults. Your accounts stay.' '<StackPanel x:Name="ResetAsk" Orientation="Horizontal" Visibility="Collapsed"><Button x:Name="ResetNo" Style="{DynamicResource TextBtn}" Content="Keep"/><Button x:Name="ResetYes" Style="{DynamicResource AccentBtn}" Content="Reset"/></StackPanel><Button x:Name="ResetBtn" Style="{DynamicResource TextBtn}" Content="Reset"/>')
 
 [xml]$settingsXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Claude Usage Widget - Settings" Width="740" Height="660" MinWidth="600" MinHeight="480"
+        Title="Claude Usage Widget settings" Width="780" Height="610" MinWidth="640" MinHeight="480"
         WindowStartupLocation="CenterScreen" ResizeMode="CanResize" ShowInTaskbar="True"
-        Background="$($Theme.card)" UseLayoutRounding="True" SnapsToDevicePixels="True"
+        Background="$($Theme.win)" UseLayoutRounding="True" SnapsToDevicePixels="True"
         FontFamily="Segoe UI Variable Text, Segoe UI" TextElement.Foreground="$($Theme.fg)">
   <Grid>
-    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-    <Border Grid.Row="0" Padding="20,16,20,12" BorderBrush="$($Theme.border)" BorderThickness="0,0,0,1">
-      <StackPanel Orientation="Horizontal">
-        <RadioButton x:Name="Tab_acct" Style="{DynamicResource Seg}" GroupName="tabs" Content="Accounts" IsChecked="True" FontSize="13"/>
-        <RadioButton x:Name="Tab_disp" Style="{DynamicResource Seg}" GroupName="tabs" Content="Display" FontSize="13"/>
-        <RadioButton x:Name="Tab_cap" Style="{DynamicResource Seg}" GroupName="tabs" Content="Captions" FontSize="13"/>
-        <RadioButton x:Name="Tab_upd" Style="{DynamicResource Seg}" GroupName="tabs" Content="Updates" FontSize="13"/>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="210"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <DockPanel Grid.Column="0" Margin="10,10,10,14">
+      <TextBlock x:Name="SVersion" DockPanel.Dock="Bottom" FontSize="12" Foreground="$($Theme.sub)" Margin="14,0,0,0"/>
+      <StackPanel>
+        $(New-NavXaml 'task' '&#xE7F4;' 'Taskbar')
+        $(New-NavXaml 'list' '&#xE8FD;' 'Usage list')
+        $(New-NavXaml 'acct' '&#xE716;' 'Accounts')
+        $(New-NavXaml 'gen' '&#xE713;' 'General')
       </StackPanel>
-    </Border>
-    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <Grid Margin="20,16,20,20">
-        <StackPanel x:Name="PanAcct">
-          <TextBlock Text="Pick an account below to change it. Tick On taskbar to put it there; the arrows set the order. The bin removes an account from the widget only; your Claude login stays." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,0,0,10"/>
-          <WrapPanel x:Name="AcctChips" Margin="0,0,0,6"/>
-          <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-            <Button x:Name="FindBtn" Style="{DynamicResource TextBtn}" Content="Find new accounts" Margin="-6,0,0,0"/>
-            <Button x:Name="AddBtn" Style="{DynamicResource TextBtn}" Content="Add account"/>
+    </DockPanel>
+    <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <StackPanel Margin="26,18,28,24">
+        <DockPanel Margin="0,0,0,16">
+          <StackPanel x:Name="PageActions" DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
+            <Button x:Name="FindBtn" Style="{DynamicResource TextBtn}" Content="Find accounts"/>
+            <Button x:Name="AddBtn" Style="{DynamicResource AccentBtn}" Content="Add account"/>
           </StackPanel>
-          <TextBlock x:Name="AcctMsg" FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
-          <StackPanel x:Name="AcctTools"/>
-          <StackPanel x:Name="SNewAcctBox" Margin="0,8,0,0"/>
-          <StackPanel x:Name="SList" Margin="0,6,0,0"/>
-          <TextBlock Text="Rings shows one ring per limit. Combined shows 5h and 7d in one dial. Plan: Auto shows what the API reports; setup-tokens can't read it, so pick theirs." FontSize="11.5" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="2,10,2,0"/>
-        </StackPanel>
-        <StackPanel x:Name="PanDisp">
-          <TextBlock Text="Size" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
-          <StackPanel Orientation="Horizontal">
-            <RadioButton x:Name="Sz_compact" Style="{DynamicResource Seg}" GroupName="size" Content="Compact" FontSize="12.5"/>
-            <RadioButton x:Name="Sz_normal" Style="{DynamicResource Seg}" GroupName="size" Content="Normal" FontSize="12.5"/>
-            <RadioButton x:Name="Sz_large" Style="{DynamicResource Seg}" GroupName="size" Content="Large" FontSize="12.5"/>
-          </StackPanel>
-          <TextBlock Text="Large also shows when each limit resets (when something is shown next to the ring)." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,4,0,16"/>
-          <TextBlock Text="Inside the ring" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
-          <StackPanel Orientation="Horizontal">
-            <RadioButton x:Name="In_none" Style="{DynamicResource Seg}" GroupName="inside" Content="Nothing" FontSize="12.5"/>
-            <RadioButton x:Name="In_initials" Style="{DynamicResource Seg}" GroupName="inside" Content="Initials" FontSize="12.5"/>
-            <RadioButton x:Name="In_percent" Style="{DynamicResource Seg}" GroupName="inside" Content="Percentage" FontSize="12.5"/>
-          </StackPanel>
-          <TextBlock Text="Set each account's initials under Accounts." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,4,0,16"/>
-          <TextBlock Text="Next to the ring" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
-          <WrapPanel>
-            <RadioButton x:Name="Nx_none" Style="{DynamicResource Seg}" GroupName="next" Content="Nothing" FontSize="12.5" Margin="0,0,0,4"/>
-            <RadioButton x:Name="Nx_caption" Style="{DynamicResource Seg}" GroupName="next" Content="Caption" FontSize="12.5" Margin="0,0,0,4"/>
-            <RadioButton x:Name="Nx_percent" Style="{DynamicResource Seg}" GroupName="next" Content="Percentage" FontSize="12.5" Margin="0,0,0,4"/>
-            <RadioButton x:Name="Nx_resetin" Style="{DynamicResource Seg}" GroupName="next" Content="Reset in" FontSize="12.5" Margin="0,0,0,4"/>
-            <RadioButton x:Name="Nx_resetat" Style="{DynamicResource Seg}" GroupName="next" Content="Reset day + time" FontSize="12.5" Margin="0,0,0,4"/>
-          </WrapPanel>
-          <TextBlock Text="Caption is 5h / 7d (rename them under Captions). Reset in reads 'in 3h 05m'; Reset day + time reads 'Sat 03:02'. Hover the rings for everything." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,4,0,16"/>
-          <TextBlock Text="Inner ring" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
-          <StackPanel Orientation="Horizontal">
-            <RadioButton x:Name="Iw_5h" Style="{DynamicResource Seg}" GroupName="innerw" Content="5h inside, 7d outside" FontSize="12.5"/>
-            <RadioButton x:Name="Iw_7d" Style="{DynamicResource Seg}" GroupName="innerw" Content="7d inside, 5h outside" FontSize="12.5"/>
-          </StackPanel>
-          <TextBlock Text="For combined dials. An account can override this under Accounts > Middle." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,4,0,16"/>
-          <TextBlock Text="Account name" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
-          <StackPanel Orientation="Horizontal">
-            <RadioButton x:Name="Nm_left" Style="{DynamicResource Seg}" GroupName="names" Content="Left" FontSize="12.5"/>
-            <RadioButton x:Name="Nm_right" Style="{DynamicResource Seg}" GroupName="names" Content="Right" FontSize="12.5"/>
-            <RadioButton x:Name="Nm_hidden" Style="{DynamicResource Seg}" GroupName="names" Content="Hidden" FontSize="12.5"/>
-          </StackPanel>
-          <TextBlock Text="Where each account's name sits relative to its rings." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,4,0,16"/>
-          <TextBlock Text="Spacing" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
-          <StackPanel Orientation="Horizontal">
-            <RadioButton x:Name="Sp_tight" Style="{DynamicResource Seg}" GroupName="spacing" Content="Tight" FontSize="12.5"/>
-            <RadioButton x:Name="Sp_normal" Style="{DynamicResource Seg}" GroupName="spacing" Content="Normal" FontSize="12.5"/>
-            <RadioButton x:Name="Sp_wide" Style="{DynamicResource Seg}" GroupName="spacing" Content="Wide" FontSize="12.5"/>
-          </StackPanel>
-          <TextBlock Text="The gap between accounts and between an account's rings. Works in every size." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,4,0,16"/>
-          <CheckBox x:Name="OptDividers" Content="Dividers between accounts" FontSize="13"/>
-          <TextBlock Text="A thin line between the accounts on the taskbar." FontSize="12" Foreground="$($Theme.sub)" Margin="22,2,0,14"/>
-          <CheckBox x:Name="OptHideLimit" Content="Hide an account while it's at its limit" FontSize="13"/>
-          <TextBlock Text="When its 5h or 7d window reaches 100% the account leaves the taskbar until the window resets. It stays in the list. If every account is at its limit they all stay." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="22,2,0,14"/>
-          <CheckBox x:Name="OptLegend" Content="Show the legend in the account list" FontSize="13"/>
-          <TextBlock Text="The line under the list that says which ring is which and what the colours mean." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="22,2,0,14"/>
-          <CheckBox x:Name="OptAnim" Content="Animations" FontSize="13"/>
-          <TextBlock Text="Fade and slide the account list in and out." FontSize="12" Foreground="$($Theme.sub)" Margin="22,2,0,18"/>
-          <StackPanel Orientation="Horizontal">
-            <TextBlock Text="Refresh every" FontSize="13" VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <TextBox x:Name="OptRefresh" Width="56" TextAlignment="Center" FontSize="13" ToolTip="Minutes between refreshes (5 or more)"/>
-            <TextBlock Text="minutes (5 or more)" FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="8,0,0,0"/>
-          </StackPanel>
-        </StackPanel>
-        <StackPanel x:Name="PanCap">
-          <TextBlock Text="The short names shown next to the rings and in the list." FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,0,0,10"/>
-          <UniformGrid Columns="3">
-            <DockPanel Margin="0,0,6,0"><TextBlock DockPanel.Dock="Top" Text="5-hour" FontSize="12" Foreground="$($Theme.sub)" Margin="0,0,0,3"/><TextBox x:Name="Cap_5h" FontSize="13"/></DockPanel>
-            <DockPanel Margin="3,0,3,0"><TextBlock DockPanel.Dock="Top" Text="7-day" FontSize="12" Foreground="$($Theme.sub)" Margin="0,0,0,3"/><TextBox x:Name="Cap_7d" FontSize="13"/></DockPanel>
-            <DockPanel Margin="6,0,0,0"><TextBlock DockPanel.Dock="Top" Text="Fable weekly" FontSize="12" Foreground="$($Theme.sub)" Margin="0,0,0,3"/><TextBox x:Name="Cap_fable" FontSize="13"/></DockPanel>
+          <TextBlock x:Name="PageTitle" FontSize="26" FontWeight="SemiBold" Foreground="$($Theme.fg)"/>
+        </DockPanel>
+        <StackPanel x:Name="PanTask">
+          <Border Background="$($Theme.tb)" BorderBrush="$($Theme.rowline)" BorderThickness="1" CornerRadius="6" Padding="16,10,16,12" Margin="0,0,0,18">
+            <StackPanel>
+              <TextBlock Text="Preview" FontSize="12" Foreground="$($Theme.sub)" Margin="0,0,0,6"/>
+              <WrapPanel x:Name="PrevGroups"/>
+            </StackPanel>
+          </Border>
+          <DockPanel Margin="0,0,0,8">
+            <TextBlock x:Name="LookCustom" DockPanel.Dock="Right" Text="Custom: set under More options" FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Bottom" Visibility="Collapsed"/>
+            <TextBlock Text="Look" FontSize="15" FontWeight="SemiBold" Foreground="$($Theme.fg)"/>
+          </DockPanel>
+          <UniformGrid Columns="3" Margin="0,0,-10,16">
+            $(New-TileXaml 'minimal' 'Minimal' 'Rings and initials' ((New-MiniRingXaml 'TR_minimal_0' 'X') + (New-MiniRingXaml 'TR_minimal_1' 'Nj') + (New-MiniRingXaml 'TR_minimal_2' 'F')))
+            $(New-TileXaml 'balanced' 'Balanced' 'Plus usage and reset' ((New-MiniRingXaml 'TR_balanced_0' 'X') + (New-MiniText '14%' 'W 12pm')))
+            $(New-TileXaml 'detailed' 'Detailed' 'Plus names, larger' ((New-MiniRingXaml 'TR_detailed_0' 'X') + (New-MiniText 'XNDR' "14% $DOT W 12pm")))
           </UniformGrid>
+          $(New-SettingXaml '&#xE916;' 'Show the 5-hour window' '' ('<TextBlock x:Name="Show5Text" FontSize="13" Foreground="' + $Theme.fg + '" VerticalAlignment="Center" Margin="0,0,10,0"/>' + (& $sw 'Sw_show5h')) 'Show5Sub')
+          $(New-SettingXaml '&#xE7BA;' 'Accounts at their limit' '' (& $cb 'Cb_atLimit') 'AtLimitSub')
+          $(New-FoldXaml 'More' '&#xE790;' 'More options' 'Size, text beside the ring, names, spacing, dividers' $moreTaskbar)
         </StackPanel>
-        <StackPanel x:Name="PanUpd">
-          <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-            <CheckBox x:Name="OptUpdates" Content="Check for updates daily" FontSize="13" VerticalAlignment="Center"/>
-            <Button x:Name="UpdCheckBtn" Style="{DynamicResource TextBtn}" Content="Check now" Margin="8,0,0,0"/>
-          </StackPanel>
-          <TextBlock x:Name="UpdMsg" FontSize="12.5" Foreground="$($Theme.fg)" TextWrapping="Wrap" Margin="0,0,0,8"/>
+        <StackPanel x:Name="PanList">
+          $(New-SettingXaml '&#xE7BA;' 'Accounts at their limit' 'Group them at the bottom with their back time, or keep each in place with its bars.' (& $cb 'Cb_listLimited'))
+          $(New-SettingXaml '&#xE8FD;' 'Fable rows' 'Fable is a separate weekly limit. Show a row always, only when the account has used it, or never.' (& $cb 'Cb_listFable'))
+          $(New-SettingXaml '&#xE8EC;' 'Plan labels' 'The plan chip (Ultra, Max 20x) beside each account name.' (& $sw 'Sw_listPlan'))
+          $(New-FoldXaml 'ListMore' '&#xE790;' 'More options' 'Animations' $moreList)
+        </StackPanel>
+        <StackPanel x:Name="PanAcct">
+          <TextBlock x:Name="AcctMsg" FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,0,0,8" Visibility="Collapsed"/>
+          <StackPanel x:Name="AcctTools"/>
+          <StackPanel x:Name="SNewAcctBox"/>
+          <StackPanel x:Name="SList" Margin="0,2,0,0"/>
+          <TextBlock Text="Drag the grip (or press Alt+Up / Alt+Down on a row) to reorder. Removing an account only removes it from the widget; your Claude login stays." FontSize="11.5" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="2,10,2,0"/>
+        </StackPanel>
+        <StackPanel x:Name="PanGen">
+          $(New-SettingXaml '&#xE777;' 'Refresh every' 'How often the usage is read.' (& $cb 'Cb_refresh'))
+          $(New-SettingXaml '&#xE916;' 'Time format' 'How reset times are written.' (& $cb 'Cb_timeFormat'))
+          $(New-SettingXaml '&#xE7E8;' 'Start with Windows' 'Open the widget when you sign in.' (& $sw 'Sw_startup'))
+          $(New-SettingXaml '&#xE895;' 'Check for updates daily' '' ('<Button x:Name="UpdCheckBtn" Style="{DynamicResource TextBtn}" Content="Check now"/>' + (& $sw 'Sw_updates')) 'UpdMsg')
           <Grid x:Name="UpdBar" Height="6" Visibility="Collapsed" Margin="0,0,0,10">
             <Border Background="$($Theme.bar)" CornerRadius="3"/>
             <Grid>
@@ -1293,219 +1789,279 @@ foreach ($n in 'Card', 'Slide', 'RefreshBtn', 'EditBtn', 'Title', 'Status', 'Lis
               <Border Background="$($Colors.accent)" CornerRadius="3"/>
             </Grid>
           </Grid>
-          <TextBlock x:Name="UpdNotesS" FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="0,0,0,10" Visibility="Collapsed"/>
-          <Button x:Name="UpdInstallBtn" Style="{DynamicResource AccentBtn}" Content="Install update" HorizontalAlignment="Left" Margin="-6,0,0,12" Visibility="Collapsed"/>
+          <TextBlock x:Name="UpdNotesS" FontSize="12" Foreground="$($Theme.sub)" TextWrapping="Wrap" Margin="2,0,0,8" Visibility="Collapsed"/>
+          <Button x:Name="UpdInstallBtn" Style="{DynamicResource AccentBtn}" Content="Install update" HorizontalAlignment="Left" Margin="0,0,0,12" Visibility="Collapsed"/>
+          $(New-FoldXaml 'GenMore' '&#xE790;' 'More options' 'Rename the windows, open the config file, reset settings' $moreGeneral)
         </StackPanel>
-      </Grid>
+      </StackPanel>
     </ScrollViewer>
-    <Border Grid.Row="2" Padding="20,10,14,12" Background="$($Theme.hover)" BorderBrush="$($Theme.border)" BorderThickness="0,1,0,0">
-      <DockPanel>
-        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-          <Button x:Name="SApplyBtn" Style="{DynamicResource TextBtn}" Content="Apply" MinWidth="64"/>
-          <Button x:Name="SCancelBtn" Style="{DynamicResource TextBtn}" Content="Cancel" MinWidth="64"/>
-          <Button x:Name="SOkBtn" Style="{DynamicResource AccentBtn}" Content="OK" MinWidth="64"/>
-        </StackPanel>
-        <TextBlock x:Name="SStatus" Text="Changes preview on the taskbar. OK or Apply keeps them; Cancel undoes them." FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-      </DockPanel>
-    </Border>
   </Grid>
 </Window>
 "@
 $settings = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $settingsXaml))
 $settings.Resources.MergedDictionaries.Add($PopupEls.Card.Resources)
-foreach ($n in 'Cap_5h', 'Cap_7d', 'Cap_fable', 'OptDividers', 'OptAnim', 'Sz_compact', 'Sz_normal', 'Sz_large', 'In_none', 'In_initials', 'In_percent', 'Nx_none', 'Nx_caption', 'Nx_percent', 'Nx_resetin', 'Nx_resetat', 'Iw_5h', 'Iw_7d', 'Nm_left', 'Nm_right', 'Nm_hidden', 'Sp_tight', 'Sp_normal', 'Sp_wide', 'OptLegend', 'AcctChips', 'OptRefresh', 'FindBtn', 'AddBtn', 'AcctMsg', 'AcctTools', 'OptUpdates', 'UpdCheckBtn', 'UpdMsg', 'UpdBar', 'UpdC1', 'UpdC2', 'UpdNotesS', 'UpdInstallBtn', 'OptHideLimit', 'SNewAcctBox', 'SList', 'PanAcct', 'PanDisp', 'PanUpd', 'PanCap', 'Tab_acct', 'Tab_disp', 'Tab_cap', 'Tab_upd', 'SApplyBtn', 'SCancelBtn', 'SOkBtn', 'SStatus') { $PopupEls[$n] = $settings.FindName($n) }
+$SettingsNames = @('SVersion', 'Tab_task', 'Tab_list', 'Tab_acct', 'Tab_gen', 'PageActions', 'FindBtn', 'AddBtn', 'PageTitle', 'PanTask', 'PanList', 'PanAcct', 'PanGen',
+  'PrevGroups', 'LookCustom', 'Lk_minimal', 'Lk_balanced', 'Lk_detailed', 'Show5Text', 'Sw_show5h', 'Show5Sub', 'Cb_atLimit', 'AtLimitSub',
+  'MoreHead', 'MoreBody', 'MoreChev', 'ListMoreHead', 'ListMoreBody', 'ListMoreChev', 'GenMoreHead', 'GenMoreBody', 'GenMoreChev',
+  'Sz_compact', 'Sz_normal', 'Sz_large', 'In_none', 'In_initials', 'In_percent', 'Nx_none', 'Nx_caption', 'Nx_percent', 'Nx_usage', 'Nx_resetin', 'Nx_resetat',
+  'Nm_left', 'Nm_right', 'Nm_hidden', 'Sp_tight', 'Sp_normal', 'Sp_wide', 'Sw_dividers', 'Iw_5h', 'Iw_7d',
+  'Cb_listLimited', 'Cb_listFable', 'Sw_listPlan', 'Sw_anim', 'AcctMsg', 'AcctTools', 'SNewAcctBox', 'SList',
+  'Cb_refresh', 'Cb_timeFormat', 'Sw_startup', 'Sw_updates', 'UpdCheckBtn', 'UpdMsg', 'UpdBar', 'UpdC1', 'UpdC2', 'UpdNotesS', 'UpdInstallBtn',
+  'Cap_5h', 'Cap_7d', 'Cap_fable', 'OpenCfgBtn', 'ResetAsk', 'ResetNo', 'ResetYes', 'ResetBtn',
+  'TR_minimal_0', 'TR_minimal_1', 'TR_minimal_2', 'TR_balanced_0', 'TR_detailed_0')
+foreach ($n in $SettingsNames) {
+  $el = $settings.FindName($n)
+  if (-not $el) { throw "settings control missing: $n" }
+  $PopupEls[$n] = $el
+}
 $settingsIcon = Join-Path $PSScriptRoot 'assets\icon.ico'
 if (Test-Path $settingsIcon) { try { $settings.Icon = [Windows.Media.Imaging.BitmapFrame]::Create((New-Object Uri $settingsIcon)) } catch {} }
-$script:editing = $false
-$script:tab = 'acct'          # Settings tab: acct | disp | cap | upd
-$script:expanded = $null      # account whose details are open in the Accounts tab ('' = none)
+$PopupEls.SVersion.Text = "Version $AppVersion"
+$script:tab = 'task'          # Settings page: task | list | acct | gen
+$script:expanded = $null      # account whose details are open in the Accounts page
 $script:newAccts = @()        # accounts found on this PC that the widget doesn't have and wasn't told to ignore
 $script:findAuto = $false
 $script:lastFind = [DateTime]::MinValue
 
-function Get-BarXaml($key, $win) {
+# One window row in the list: caption 40 | bar * (6 high) | pct 40 right | reset 78 right. The reset is left out when it
+# equals the row above (Fable usually resets with 7d); a 0% row is dimmer; within an hour the reset text turns bright.
+function Get-WindowRowXaml($key, $win, [string]$prevReset) {
   $pct = $win.pct
   $p = if ($null -ne $pct) { [Math]::Max(0, [Math]::Min(100, [double]$pct)) } else { 0 }
+  $zero = ($null -ne $pct -and [Math]::Round([double]$pct) -eq 0)
   $pctText = if ($null -ne $pct) { "$(Format-Pct $pct)%" } else { $DASH }
-@"
-<Grid $ns Margin="0,6,0,0">
-  <Grid.ColumnDefinitions><ColumnDefinition Width="44"/><ColumnDefinition Width="*"/><ColumnDefinition Width="46"/><ColumnDefinition Width="92"/></Grid.ColumnDefinitions>
-  <TextBlock Text="$(Esc (Get-Caption $key))" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-  <Grid Grid.Column="1" Height="6" VerticalAlignment="Center">
-    <Border Background="$($Theme.bar)" CornerRadius="3"/>
-    <Grid>
-      <Grid.ColumnDefinitions><ColumnDefinition Width="$($p)*"/><ColumnDefinition Width="$(100 - $p)*"/></Grid.ColumnDefinitions>
-      <Border Background="$(Get-UsageColor $pct)" CornerRadius="3"/>
+  $rs = if ($win -and $win.reset) { Get-Reset $win.reset } else { '' }
+  $soon = $false
+  if ($win -and $win.reset) { $left = (ConvertTo-LocalTime $win.reset) - (Get-Date); $soon = $left.TotalMinutes -gt 0 -and $left.TotalMinutes -lt 60 }
+  $resetXaml = ''
+  if ($rs -and $rs -ne $prevReset) {
+    $c = if ($soon) { $Theme.fg } else { $Theme.sub }
+    $resetXaml = "<StackPanel Grid.Column=`"3`" Orientation=`"Horizontal`" HorizontalAlignment=`"Right`" VerticalAlignment=`"Center`"><TextBlock Text=`"&#xE81C;`" FontFamily=`"$FontIcons`" FontSize=`"10`" Foreground=`"$c`" VerticalAlignment=`"Center`" Margin=`"0,1,5,0`"/><TextBlock Text=`"$(Esc $rs)`" FontSize=`"11.5`" Foreground=`"$c`"/></StackPanel>"
+  }
+  $tip = if ($win -and $win.reset) { " ToolTip=`"$(Esc (Get-ResetLong $win.reset))`"" } else { '' }
+  $row = @"
+<Border Padding="4,3" Margin="0,1" CornerRadius="6" Background="Transparent"$tip>
+  <Grid>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/><ColumnDefinition Width="78"/></Grid.ColumnDefinitions>
+    <TextBlock Text="$(Esc (Get-Caption $key))" FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+    <Grid Grid.Column="1" Height="6" VerticalAlignment="Center" Margin="0,0,10,0">
+      <Border Background="$($Theme.bar)" CornerRadius="3"/>
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="$($p)*"/><ColumnDefinition Width="$(100 - $p)*"/></Grid.ColumnDefinitions>
+        <Border Background="$(Get-UsageColor $pct)" CornerRadius="3"/>
+      </Grid>
     </Grid>
+    <TextBlock Grid.Column="2" Text="$pctText" FontSize="12.5" FontWeight="$(if ($zero) { 'Normal' } else { 'SemiBold' })" Foreground="$(if ($zero) { $Theme.sub } else { $Theme.fg })" TextAlignment="Right" VerticalAlignment="Center" FontFamily="Segoe UI Variable Text, Segoe UI"/>
+    $resetXaml
   </Grid>
-  <TextBlock Grid.Column="2" Text="$pctText" FontSize="12" FontWeight="SemiBold" Foreground="$($Theme.fg)" TextAlignment="Right" VerticalAlignment="Center"/>
-  <TextBlock Grid.Column="3" Text="$(Esc (Format-Reset $win.reset))" FontSize="11" Foreground="$($Theme.sub)" TextAlignment="Right" VerticalAlignment="Center"/>
-</Grid>
+</Border>
 "@
+  return [pscustomobject]@{ xaml = $row; reset = $rs }
 }
 
-function Get-Note($res) {
+# The windows the list shows for an account: 5h when it has one (and 5h is on), 7d, and Fable per the list setting.
+function Get-ListKeys($cfg, $res) {
+  $keys = @()
+  if (@(Get-ShownLimits $cfg $res) -contains '5h') { $keys += '5h' }
+  $keys += '7d'
+  $lf = "$($script:config.listFable)"
+  $f = Get-Win $res 'fable'
+  if ($lf -eq 'always' -or ($lf -ne 'never' -and $f -and $null -ne $f.pct)) { $keys += 'fable' }
+  return $keys
+}
+
+# Problem states replace an account's rows with one line: a warning glyph and what to do.
+function Get-ProblemText($res) {
   if (-not $res) { return $(if ($script:job) { "Loading$ELL" } else { '' }) }
   switch ($res.status) {
-    'limited' { 'Limit reached' }
     'expired' { 'Login expired: open Claude Code to renew it' }
-    default   { if ($res.error) { $res.error } else { '' } }
+    'invalid' { if ($res.error) { $res.error } else { 'Token invalid' } }
+    'error'   { if ($res.error) { $res.error } else { 'Could not read usage' } }
+    default   { '' }
   }
 }
 
-function New-AccountRow($cfg, $shownNames, [bool]$edit) {
+# One account in the list: name + plan chip, then a window row per shown window (or one problem line).
+function New-ListBlock($cfg) {
   $res = Get-Result $cfg.name
-  $label = Esc (Get-Label $cfg)
-  $plan = Esc $(if (Get-Plan $cfg $res) { "   $(Get-Plan $cfg $res)" } else { '' })
-  if ($edit) {
-    $open = $true   # the account picked in the chip strip is always shown in full
-    $limits = @(Get-TaskbarLimits $cfg)
-    $combined = $cfg.style -eq 'combined'
-    $pie = Get-PieKey $cfg
-    $id = [regex]::Replace("$($cfg.name)", '[^A-Za-z0-9_]', '_')
-    # Plan picker: Auto ('') plus the fixed choices, plus a custom plan from the config so it isn't lost.
-    $planOpts = @('') + $PlanChoices
-    $curPlan = "$($cfg.plan)".Trim()
-    if ($curPlan -and $PlanChoices -notcontains $curPlan) { $planOpts += $curPlan }
-    $planBoxes = (0..($planOpts.Count - 1) | ForEach-Object {
-      "<RadioButton Name=`"PL_$_`" Style=`"{DynamicResource Seg}`" GroupName=`"plan_$id`" Content=`"$(Esc $(if ($planOpts[$_]) { $planOpts[$_] } else { 'Auto' }))`" IsChecked=`"$($planOpts[$_] -eq $curPlan)`"/>"
-    }) -join ''
-    $planApi = if ($res.apiPlan) { 'API: yes' } elseif ($res) { 'API: n/a' } else { '' }
-    $ringBoxes = ($LimitKeys | ForEach-Object {
-      "<CheckBox Name=`"L_$_`" Content=`"$(Esc (Get-Caption $_))`" Margin=`"0,0,14,0`" IsChecked=`"$(if ($limits -contains $_) { 'True' } else { 'False' })`"/>"
-    }) -join ''
-    $row = [Windows.Markup.XamlReader]::Parse(@"
-<Border $ns CornerRadius="6" Padding="10,8" Margin="0,1" Background="$($Theme.hover)">
-  <StackPanel>
-    <DockPanel>
-      <CheckBox Name="Tb" DockPanel.Dock="Left" VerticalAlignment="Center" Margin="0,0,12,0" Content="On taskbar" FontSize="12" ToolTip="Show this account on the taskbar"/>
-      <Button Name="Del" DockPanel.Dock="Right" Style="{DynamicResource IconBtn}" Content="&#xE74D;" ToolTip="Remove this account from the widget (your login is untouched)"/>
-      <StackPanel Name="DelConfirm" DockPanel.Dock="Right" Orientation="Horizontal" Visibility="Collapsed">
-        <Button Name="DelYes" Style="{DynamicResource TextBtn}" Content="Remove"/>
-        <Button Name="DelNo" Style="{DynamicResource TextBtn}" Content="Keep"/>
-      </StackPanel>
-      <Button Name="Dn" DockPanel.Dock="Right" Style="{DynamicResource IconBtn}" Content="&#xE74B;" ToolTip="Move down"/>
-      <Button Name="Up" DockPanel.Dock="Right" Style="{DynamicResource IconBtn}" Content="&#xE74A;" ToolTip="Move up"/>
-      <TextBlock Name="PlanText" DockPanel.Dock="Right" Text="$plan" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="6,0,0,0"/>
-      <TextBox Name="Label" Text="$label" ToolTip="Account name"/>
-    </DockPanel>
-    <StackPanel Name="Det" Visibility="$(if ($open) { 'Visible' } else { 'Collapsed' })">
-    <DockPanel Margin="26,9,0,0">
-      <StackPanel Orientation="Horizontal">
-        <TextBlock Text="Style" Width="48" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
-        <RadioButton Name="S_rings" Style="{DynamicResource Seg}" GroupName="style_$id" Content="Rings" IsChecked="$(-not $combined)"/>
-        <RadioButton Name="S_combined" Style="{DynamicResource Seg}" GroupName="style_$id" Content="Combined" IsChecked="$combined"/>
-      </StackPanel>
-    </DockPanel>
-    <StackPanel Orientation="Horizontal" Margin="26,8,0,0">
-      <TextBlock Text="Initials" Width="48" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
-      <TextBox Name="Short" Width="40" MaxLength="2" TextAlignment="Center" Text="$(Esc ((Get-Shorts)[$cfg.name]))" ToolTip="1 or 2 characters. Empty: automatic"/>
-      <TextBlock Text="shown inside the ring when Display > Inside the ring is Initials" FontSize="10.5" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="8,0,0,0"/>
-    </StackPanel>
-    <WrapPanel Margin="26,8,0,0" ToolTip="Auto shows the plan the API reports. Setup-tokens can't read it, so pick it here.">
-      <TextBlock Text="Plan" Width="48" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
-      $planBoxes
-      <TextBlock Text="$(Esc $planApi)" FontSize="10.5" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="2,0,0,0"/>
-    </WrapPanel>
-    <WrapPanel Name="RingsPanel" Margin="26,8,0,0" Visibility="$(if ($combined) { 'Collapsed' } else { 'Visible' })">
-      <TextBlock Text="Rings" Width="48" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
-      $ringBoxes
-    </WrapPanel>
-    <StackPanel Name="PiePanel" Orientation="Horizontal" Margin="26,8,0,0" Visibility="$(if ($combined) { 'Visible' } else { 'Collapsed' })">
-      <TextBlock Text="Middle" Width="48" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
-      <RadioButton Name="P_5h" Style="{DynamicResource Seg}" GroupName="pie_$id" Content="$(Esc (Get-Caption '5h'))" IsChecked="$($pie -eq '5h')"/>
-      <RadioButton Name="P_7d" Style="{DynamicResource Seg}" GroupName="pie_$id" Content="$(Esc (Get-Caption '7d'))" IsChecked="$($pie -eq '7d')"/>
-      <TextBlock Text="pie in the middle, the other on the ring" FontSize="10.5" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="6,0,0,0"/>
-    </StackPanel>
-    </StackPanel>
-  </StackPanel>
-</Border>
-"@)
-    $vis = @(Get-Visible | ForEach-Object name)
-    $at = [array]::IndexOf($vis, $cfg.name)
-    $up = $row.FindName('Up'); $up.Tag = $cfg.name; $up.IsEnabled = $at -gt 0
-    $up.Add_Click({ param($s) Move-Account $s.Tag -1 })
-    $dn = $row.FindName('Dn'); $dn.Tag = $cfg.name; $dn.IsEnabled = $at -ge 0 -and $at -lt $vis.Count - 1
-    $dn.Add_Click({ param($s) Move-Account $s.Tag 1 })
-    $del = $row.FindName('Del')
-    $del.Tag = $row
-    $del.Add_Click({ param($s) $s.Visibility = 'Collapsed'; $s.Tag.FindName('DelConfirm').Visibility = 'Visible' })
-    $no = $row.FindName('DelNo')
-    $no.Tag = $row
-    $no.Add_Click({ param($s) $s.Tag.FindName('DelConfirm').Visibility = 'Collapsed'; $s.Tag.FindName('Del').Visibility = 'Visible' })
-    $yes = $row.FindName('DelYes')
-    $yes.Tag = $cfg.name
-    $yes.Add_Click({ param($s) Remove-Account $s.Tag })
-    $tb = $row.FindName('Label')
-    $tb.Tag = $cfg.name
-    $tb.Add_TextChanged({ param($s) Set-AcctProp $s.Tag 'label' $s.Text; Save-UiConfig; Update-Widget })
-    $sb = $row.FindName('Short')
-    $sb.Tag = $cfg.name
-    $sb.Add_TextChanged({ param($s) Set-AcctProp $s.Tag 'short' $s.Text.Trim(); Save-UiConfig; Update-Widget })
-    foreach ($k in $LimitKeys) {
-      $cb = $row.FindName("L_$k")
-      $cb.Tag = "$($cfg.name)|$k"
-      $cb.Add_Click({ param($s) $n, $key = $s.Tag -split '\|', 2; Set-Limit $n $key ([bool]$s.IsChecked) $s })
-    }
-    foreach ($opt in 'rings', 'combined') {
-      $rb = $row.FindName("S_$opt")
-      $rb.Tag = @{ name = $cfg.name; value = $opt; row = $row }
-      $rb.Add_Checked({
-        param($s)
-        Set-AcctProp $s.Tag.name 'style' $s.Tag.value
-        $c = $s.Tag.value -eq 'combined'
-        $s.Tag.row.FindName('RingsPanel').Visibility = if ($c) { 'Collapsed' } else { 'Visible' }
-        $s.Tag.row.FindName('PiePanel').Visibility = if ($c) { 'Visible' } else { 'Collapsed' }
-        Save-UiConfig; Update-Widget
-      })
-    }
-    foreach ($opt in '5h', '7d') {
-      $rb = $row.FindName("P_$opt")
-      $rb.Tag = @{ name = $cfg.name; value = $opt }
-      $rb.Add_Checked({ param($s) Set-AcctProp $s.Tag.name 'pie' $s.Tag.value; Save-UiConfig; Update-Widget })
-    }
-    for ($i = 0; $i -lt $planOpts.Count; $i++) {
-      $rb = $row.FindName("PL_$i")
-      $rb.Tag = @{ name = $cfg.name; value = $planOpts[$i]; row = $row }
-      $rb.Add_Checked({
-        param($s)
-        Set-AcctProp $s.Tag.name 'plan' $s.Tag.value
-        $shown = Get-Plan (Get-AcctCfg $s.Tag.name) (Get-Result $s.Tag.name)
-        $s.Tag.row.FindName('PlanText').Text = if ($shown) { "   $shown" } else { '' }
-        Save-UiConfig; Update-Widget
-      })
-    }
+  $plan = Get-Plan $cfg $res
+  $chip = if ($plan -and $script:config.listPlan -ne $false) { "<Border Background=`"$($Theme.chip)`" CornerRadius=`"4`" Padding=`"6,1,6,2`" Margin=`"8,0,0,0`" VerticalAlignment=`"Center`"><TextBlock Text=`"$(Esc $plan)`" FontSize=`"10.5`" Foreground=`"$($Theme.sub)`"/></Border>" } else { '' }
+  $problem = Get-ProblemText $res
+  $rows = ''
+  if ($problem) {
+    $c = if ($res) { $Colors.warn } else { $Theme.sub }
+    $glyph = if ($res) { "<TextBlock Text=`"&#xE7BA;`" FontFamily=`"$FontIcons`" FontSize=`"13`" Foreground=`"$($Colors.warn)`" Margin=`"0,1,8,0`" VerticalAlignment=`"Top`"/>" } else { '' }
+    $rows = "<StackPanel Orientation=`"Horizontal`" Margin=`"4,4,0,2`">$glyph<TextBlock Text=`"$(Esc $problem)`" FontSize=`"12`" Foreground=`"$($Theme.sub)`" TextWrapping=`"Wrap`" MaxWidth=`"320`"/></StackPanel>"
   } else {
-    $note = Get-Note $res
-    $bars = $(if (Test-NoFiveH $res) { '' } else { Get-BarXaml '5h' (Get-Win $res '5h') }) + (Get-BarXaml '7d' (Get-Win $res '7d'))
-    $fable = Get-Win $res 'fable'
-    if ($fable -and $null -ne $fable.pct) { $bars += Get-BarXaml 'fable' $fable }
-    $noteXaml = if ($note) {
-      $color = if ($res.status -in 'limited', 'expired', 'invalid', 'error') { $Colors.bad } else { $Theme.sub }
-      "<TextBlock Text=`"$(Esc $note)`" FontSize=`"11`" Foreground=`"$color`" Margin=`"0,6,0,0`" TextWrapping=`"Wrap`"/>"
-    } else { '' }
-    $row = [Windows.Markup.XamlReader]::Parse(@"
-<Border $ns CornerRadius="6" Padding="10,8" Margin="0,1" Background="Transparent">
-  <StackPanel>
-    <DockPanel>
-      <TextBlock TextTrimming="CharacterEllipsis" VerticalAlignment="Center"><Run Text="$label" FontSize="13" FontWeight="SemiBold" Foreground="$($Theme.fg)"/><Run Text="$plan" FontSize="11" Foreground="$($Theme.sub)"/></TextBlock>
-    </DockPanel>
-    <StackPanel Margin="26,0,0,0">$bars$noteXaml</StackPanel>
-  </StackPanel>
-</Border>
-"@)
-    $via = switch ($res.method) { 'usage-api' { 'Read via the usage API (free)' } 'probe' { 'Read via a 1-token probe (setup-tokens cannot use the usage API)' } default { $null } }
-    $planVia = if ($res.apiPlan) { 'Plan read from the API' } elseif ($res -and $cfg.plan) { "Plan set in settings (the API doesn't report it for this token)" }
-    $tipLines = @($via, $planVia) | Where-Object { $_ }
-    if ($tipLines) { $row.ToolTip = $tipLines -join "`n" }
-    $row.Add_MouseEnter({ param($s) $s.Background = $Theme.hover })
-    $row.Add_MouseLeave({ param($s) $s.Background = 'Transparent' })
+    $prev = ''
+    foreach ($k in (Get-ListKeys $cfg $res)) {
+      $r = Get-WindowRowXaml $k (Get-Win $res $k) $prev
+      $rows += $r.xaml
+      if ($r.reset) { $prev = $r.reset }
+    }
   }
-  $cb = $row.FindName('Tb')
-  if ($cb) {
-    $cb.IsChecked = $shownNames -contains $cfg.name
-    $cb.Tag = $cfg.name
-    $cb.Add_Click({ param($s) Set-Taskbar $s.Tag ([bool]$s.IsChecked) $s })
+  $block = [Windows.Markup.XamlReader]::Parse(@"
+<StackPanel $ns Margin="0,0,0,8">
+  <StackPanel Orientation="Horizontal" Margin="4,4,0,3">
+    <TextBlock Text="$(Esc (Get-Label $cfg))" FontSize="13" FontWeight="SemiBold" Foreground="$($Theme.fg)" TextTrimming="CharacterEllipsis" MaxWidth="240"/>
+    $chip
+  </StackPanel>
+  <StackPanel Name="Rows">$rows</StackPanel>
+</StackPanel>
+"@)
+  foreach ($r in $block.FindName('Rows').Children) {
+    if ($r -is [Windows.Controls.Border]) {
+      $r.Add_MouseEnter({ param($s) $s.Background = $Theme.hover })
+      $r.Add_MouseLeave({ param($s) $s.Background = 'Transparent' })
+    }
+  }
+  $via = switch ($res.method) { 'usage-api' { 'Read via the usage API (free)' } 'probe' { 'Read via a 1-token probe (setup-tokens cannot use the usage API)' } default { $null } }
+  $planVia = if ($res.apiPlan) { 'Plan read from the API' } elseif ($res -and $cfg.plan) { "Plan set in settings (the API doesn't report it for this token)" }
+  $tipLines = @($via, $planVia) | Where-Object { $_ }
+  if ($tipLines) { $block.ToolTip = $tipLines -join "`n" }
+  return $block
+}
+
+# An at-limit account in the group: a small red ring, the name, and "Back Su 1am".
+function New-LimitedRow($cfg) {
+  $res = Get-Result $cfg.name
+  $b = Get-BackAt $res
+  $back = if ($b) { Get-Reset $b } else { $DASH }
+  [Windows.Markup.XamlReader]::Parse(@"
+<Grid $ns Margin="4,3,4,3">
+  <Ellipse Width="13" Height="13" Stroke="$($Colors.bad)" StrokeThickness="2.4" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+  <TextBlock Text="$(Esc (Get-Label $cfg))" FontSize="13" Foreground="$($Theme.fg)" Margin="24,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="200" HorizontalAlignment="Left"/>
+  <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="12" Foreground="$($Theme.sub)"><Run Text="Back "/><Run Text="$(Esc $back)" FontWeight="SemiBold" Foreground="$($Theme.fg)"/></TextBlock>
+</Grid>
+"@)
+}
+
+# One account in Settings > Accounts: grip, a small ring of its tightest window, name, plan chip, what it shows, the
+# taskbar switch and a chevron; the open row also has name, initials, plan, rings, shown windows and Remove.
+function New-AccountSettingsRow($cfg, $shownNames) {
+  $res = Get-Result $cfg.name
+  $open = $script:expanded -eq $cfg.name
+  $plan = Get-Plan $cfg $res
+  $limited = Test-Limited $res
+  $t = Get-Tightest $cfg $res
+  $keys = @(Get-ShownLimits $cfg $res)
+  $summary = if ($limited) {
+    $b = Get-BackAt $res
+    "<TextBlock Text=`"At limit$(if ($b) { ', back ' + (Get-Reset $b) })`" FontSize=`"12.5`" Foreground=`"$($Colors.bad)`" VerticalAlignment=`"Center`"/>"
+  } else {
+    "<TextBlock Text=`"$(Esc (($keys | ForEach-Object { Get-Caption $_ }) -join " $DOT "))`" FontSize=`"12.5`" Foreground=`"$($Theme.sub)`" VerticalAlignment=`"Center`"/>"
+  }
+  $chip = if ($plan) { "<Border Background=`"$($Theme.chip)`" CornerRadius=`"4`" Padding=`"7,2,7,3`" Margin=`"12,0,14,0`" VerticalAlignment=`"Center`"><TextBlock Text=`"$(Esc $plan)`" FontSize=`"11.5`" Foreground=`"$($Theme.sub)`"/></Border>" } else { '<Border Width="14"/>' }
+  # Plan list: Auto (shows what the API reports) plus the fixed choices, plus a custom plan from the config so it isn't lost.
+  $planOpts = @('') + $PlanChoices
+  $curPlan = "$($cfg.plan)".Trim()
+  if ($curPlan -and $PlanChoices -notcontains $curPlan) { $planOpts += $curPlan }
+  $lacks5 = Test-LacksFiveH $res
+  $combined = $cfg.style -eq 'combined'
+  $planApi = if ($res.apiPlan) { 'Plan read from the API.' } elseif ($res) { "The API doesn't report this plan: pick it here." } else { '' }
+  $via = switch ($res.method) { 'usage-api' { 'Read with the usage API (free)' } 'probe' { 'Read with a 1-token probe (setup token)' } default { '' } }
+  $limitChecks = ($LimitKeys | ForEach-Object {
+    $dis = if ($_ -eq '5h' -and ($lacks5 -or $script:config.show5h -eq $false)) { ' IsEnabled="False"' } else { '' }
+    "<CheckBox x:Name=`"L_$_`" Content=`"$(Esc (Get-Caption $_))`" Margin=`"0,0,16,0`" VerticalAlignment=`"Center`"$dis/>"
+  }) -join ''
+  $row = [Windows.Markup.XamlReader]::Parse(@"
+<StackPanel $ns xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Margin="0,0,0,0">
+  <Border x:Name="Head" Background="$($Theme.row)" BorderBrush="$($Theme.rowline)" BorderThickness="0,0,0,1" Padding="10,12,14,12" AllowDrop="True" Cursor="Arrow">
+    <DockPanel Background="Transparent">
+      <TextBlock x:Name="Chev" DockPanel.Dock="Right" Text="$(if ($open) { '&#xE70E;' } else { '&#xE70D;' })" FontFamily="$FontIcons" FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="14,0,0,0" Cursor="Hand"/>
+      <ToggleButton x:Name="Tb" DockPanel.Dock="Right" Style="{DynamicResource Switch}" VerticalAlignment="Center" ToolTip="Show this account on the taskbar"/>
+      <TextBlock x:Name="Grip" DockPanel.Dock="Left" Text="&#xE76F;" FontFamily="$FontIcons" FontSize="14" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="0,0,8,0" Cursor="SizeAll" ToolTip="Drag to reorder"/>
+      <Grid DockPanel.Dock="Left" Width="18" Height="18" VerticalAlignment="Center" Margin="0,0,12,0"><Ellipse Stroke="$($Theme.ring)" StrokeThickness="2.6"/><Path x:Name="Ring" StrokeThickness="2.6"/></Grid>
+      <TextBlock DockPanel.Dock="Left" Text="$(Esc (Get-Label $cfg))" FontSize="14" FontWeight="SemiBold" Foreground="$($Theme.fg)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="170"/>
+      <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">$chip$summary</StackPanel>
+      <Border/>
+    </DockPanel>
+  </Border>
+  <Border x:Name="Det" Visibility="$(if ($open) { 'Visible' } else { 'Collapsed' })" Background="$($Theme.row)" BorderBrush="$($Theme.rowline)" BorderThickness="0,0,0,1" Padding="46,4,14,14">
+    <Grid>
+      <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="*"/><ColumnDefinition Width="20"/><ColumnDefinition Width="64"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Grid.Column="0" Text="Name" FontSize="12.5" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
+      <TextBox x:Name="Label" Grid.Row="0" Grid.Column="1" Margin="0,4,0,4" Padding="2,3"/>
+      <TextBlock Grid.Row="0" Grid.Column="3" Text="Initials" FontSize="12.5" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
+      <Grid Grid.Row="0" Grid.Column="4" Margin="0,4,0,4"><TextBox x:Name="Short" MaxLength="2" Padding="2,3"/><TextBlock x:Name="ShortHint" Foreground="$($Theme.sub)" FontSize="12.5" Margin="9,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/></Grid>
+      <TextBlock Grid.Row="1" Grid.Column="0" Text="Plan" FontSize="12.5" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
+      <ComboBox x:Name="Plan" Grid.Row="1" Grid.Column="1" Style="{DynamicResource Combo}" Margin="0,4,0,4" ToolTip="$(Esc $planApi)"/>
+      <TextBlock Grid.Row="1" Grid.Column="3" Text="Rings" FontSize="12.5" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
+      <ComboBox x:Name="Rings" Grid.Row="1" Grid.Column="4" Style="{DynamicResource Combo}" Margin="0,4,0,4"/>
+      <TextBlock Grid.Row="2" Grid.Column="0" Text="Show" FontSize="12.5" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
+      <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="4" Orientation="Horizontal" Margin="0,6,0,6">$limitChecks<TextBlock x:Name="No5" FontSize="11.5" Foreground="$($Theme.sub)" VerticalAlignment="Center"/></StackPanel>
+      <DockPanel Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="5" Margin="0,6,0,0">
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+          <StackPanel x:Name="DelConfirm" Orientation="Horizontal" Visibility="Collapsed">
+            <Button x:Name="DelYes" Style="{DynamicResource TextBtn}" Content="Remove"/>
+            <Button x:Name="DelNo" Style="{DynamicResource TextBtn}" Content="Keep"/>
+          </StackPanel>
+          <Button x:Name="Dn" Style="{DynamicResource IconBtn}" Content="&#xE74B;" ToolTip="Move down"/>
+          <Button x:Name="Up" Style="{DynamicResource IconBtn}" Content="&#xE74A;" ToolTip="Move up"/>
+          <Button x:Name="Del" Style="{DynamicResource LinkBtn}" Content="Remove from widget" ToolTip="Removes it from the widget only; your Claude login is untouched"/>
+        </StackPanel>
+        <TextBlock Text="$(Esc $via)" FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+      </DockPanel>
+    </Grid>
+  </Border>
+</StackPanel>
+"@)
+  $name = $cfg.name
+  $shortAuto = (Get-Shorts)[$name]
+  Set-Ring ($row.FindName('Ring')) $t.win.pct 18 2.6
+  $tb = $row.FindName('Tb'); $tb.IsChecked = $shownNames -contains $name; $tb.Tag = $name
+  $tb.Add_Click({ param($s) Set-Taskbar $s.Tag ([bool]$s.IsChecked) $s })
+  $head = $row.FindName('Head'); $head.Tag = $name
+  $head.Add_MouseLeftButtonUp({ param($s, $e)
+    if ($e.OriginalSource -is [Windows.Controls.Primitives.ToggleButton] -or $e.Handled) { return }
+    $script:expanded = if ($script:expanded -eq $s.Tag) { '' } else { $s.Tag }
+    Update-Settings
+  })
+  # Drag the grip onto another row to reorder; Alt+Up / Alt+Down moves the row; the arrows in the open row do the same.
+  $grip = $row.FindName('Grip'); $grip.Tag = $name
+  $grip.Add_PreviewMouseMove({ param($s, $e) if ($e.LeftButton -eq 'Pressed' -and -not $script:dragging) { $script:dragging = $true; try { [void][Windows.DragDrop]::DoDragDrop($s, [string]$s.Tag, [Windows.DragDropEffects]::Move) } finally { $script:dragging = $false } } })
+  $head.Add_Drop({ param($s, $e) $from = [string]$e.Data.GetData([string]); if ($from -and $from -ne $s.Tag) { Move-AccountTo $from $s.Tag } })
+  $row.Tag = $name
+  $row.Add_PreviewKeyDown({ param($s, $e)
+    if (([Windows.Input.Keyboard]::Modifiers -band [Windows.Input.ModifierKeys]::Alt) -and $e.SystemKey -in 'Up', 'Down') {
+      $e.Handled = $true; Move-Account $s.Tag $(if ($e.SystemKey -eq 'Up') { -1 } else { 1 })
+    }
+  })
+  $vis = @(Get-Visible | ForEach-Object name)
+  $at = [array]::IndexOf($vis, $name)
+  $up = $row.FindName('Up'); $up.Tag = $name; $up.IsEnabled = $at -gt 0; $up.Add_Click({ param($s) Move-Account $s.Tag -1 })
+  $dn = $row.FindName('Dn'); $dn.Tag = $name; $dn.IsEnabled = $at -ge 0 -and $at -lt $vis.Count - 1; $dn.Add_Click({ param($s) Move-Account $s.Tag 1 })
+  $del = $row.FindName('Del'); $del.Tag = $row
+  $del.Add_Click({ param($s) $s.Visibility = 'Collapsed'; $s.Tag.FindName('DelConfirm').Visibility = 'Visible' })
+  $no = $row.FindName('DelNo'); $no.Tag = $row
+  $no.Add_Click({ param($s) $s.Tag.FindName('DelConfirm').Visibility = 'Collapsed'; $s.Tag.FindName('Del').Visibility = 'Visible' })
+  $yes = $row.FindName('DelYes'); $yes.Tag = $name; $yes.Add_Click({ param($s) Remove-Account $s.Tag })
+  $lb = $row.FindName('Label'); $lb.Text = "$(Get-Label $cfg)"; $lb.Tag = $name
+  $lb.Add_TextChanged({ param($s) Set-AcctProp $s.Tag 'label' $s.Text; Save-UiConfig; Update-Widget })
+  $sb = $row.FindName('Short'); $sb.Text = "$($cfg.short)"; $sb.Tag = $name
+  $hint = $row.FindName('ShortHint'); $hint.Text = "$shortAuto (auto)"; $hint.Visibility = if ($sb.Text) { 'Collapsed' } else { 'Visible' }; $sb.Tag = @{ name = $name; hint = $hint }
+  $sb.Add_TextChanged({ param($s) $s.Tag.hint.Visibility = if ($s.Text) { 'Collapsed' } else { 'Visible' }; Set-AcctProp $s.Tag.name 'short' $s.Text.Trim(); Save-UiConfig; Update-Widget })
+  $pc = $row.FindName('Plan'); $autoText = if ($res.apiPlan) { "Auto: $($res.apiPlan)" } else { 'Auto' }
+  for ($i = 0; $i -lt $planOpts.Count; $i++) { [void]$pc.Items.Add((New-Object Windows.Controls.ComboBoxItem -Property @{ Content = $(if ($planOpts[$i]) { $planOpts[$i] } else { $autoText }); Tag = $planOpts[$i] })) }
+  $pc.SelectedIndex = [Math]::Max(0, [array]::IndexOf($planOpts, $curPlan)); $pc.Tag = $name
+  $pc.Add_SelectionChanged({ param($s) if ($s.IsLoaded -and $s.SelectedItem) { Set-AcctProp $s.Tag 'plan' $s.SelectedItem.Tag; Save-UiConfig; Update-Widget; Update-Popup -ListOnly } })
+  $rc = $row.FindName('Rings')
+  foreach ($o in @(@('separate', 'Separate rings'), @('5h', '5h inside 7d'), @('7d', '7d inside 5h'))) { [void]$rc.Items.Add((New-Object Windows.Controls.ComboBoxItem -Property @{ Content = $o[1]; Tag = $o[0] })) }
+  $rc.SelectedIndex = if (-not $combined) { 0 } elseif ((Get-PieKey $cfg) -eq '5h') { 1 } else { 2 }
+  $rc.Tag = $name
+  if ($lacks5) { $rc.SelectedIndex = 0; $rc.IsEnabled = $false; $row.FindName('No5').Text = 'No 5-hour window on this account' }
+  $rc.Add_SelectionChanged({ param($s)
+    if (-not $s.IsLoaded -or -not $s.SelectedItem) { return }
+    $v = $s.SelectedItem.Tag
+    Set-AcctProp $s.Tag 'style' $(if ($v -eq 'separate') { 'rings' } else { 'combined' })
+    if ($v -ne 'separate') { Set-AcctProp $s.Tag 'pie' $v }
+    Save-UiConfig; Update-Widget
+  })
+  $limits = @(Get-TaskbarLimits $cfg)
+  foreach ($k in $LimitKeys) {
+    $c = $row.FindName("L_$k"); $c.IsChecked = $limits -contains $k; $c.Tag = "$name|$k"
+    $c.Add_Click({ param($s) $n, $key = $s.Tag -split '\|', 2; Set-Limit $n $key ([bool]$s.IsChecked) $s })
   }
   return $row
 }
@@ -1516,6 +2072,42 @@ function Update-RefreshButton {
   $PopupEls.RefreshBtn.ToolTip = if ($script:job) { "Refreshing$ELL" } elseif ($cd) { "You can refresh again in ${cd}s" } else { 'Refresh now' }
 }
 
+# "(dot) 4 available   (dot) 3 at limit" under the header (hidden with a single account).
+function Update-Summary($avail, $limited, $total) {
+  $s = $PopupEls.Summary
+  $s.Children.Clear()
+  $s.Visibility = if ($total -gt 1) { 'Visible' } else { 'Collapsed' }
+  foreach ($p in @(@($avail, 'available', $Colors.ok), @($limited, 'at limit', $Colors.bad))) {
+    if ($p[1] -eq 'at limit' -and -not $p[0]) { continue }
+    [void]$s.Children.Add([Windows.Markup.XamlReader]::Parse(@"
+<StackPanel $ns Orientation="Horizontal" Margin="0,0,16,0">
+  <Ellipse Width="7" Height="7" Fill="$($p[2])" Margin="0,1,7,0"/>
+  <TextBlock FontSize="12" Foreground="$($Theme.sub)"><Run Text="$($p[0])" FontWeight="SemiBold" Foreground="$($Theme.fg)"/><Run Text=" $($p[1])"/></TextBlock>
+</StackPanel>
+"@))
+  }
+}
+
+# The "At limit 3" group under the list: a hairline, the header (click to fold), one row per account with its back time.
+function Update-LimitedBox($limited) {
+  $box = $PopupEls.LimitedBox
+  $box.Children.Clear()
+  $limited = @($limited | Where-Object { $_ })
+  if (-not $limited.Count) { return }
+  $open = $script:state.limitedOpen -ne $false
+  $head = [Windows.Markup.XamlReader]::Parse(@"
+<Border $ns BorderBrush="$($Theme.border)" BorderThickness="0,1,0,0" Margin="0,2,0,0" Padding="4,10,4,4" Background="Transparent" Cursor="Hand">
+  <DockPanel>
+    <TextBlock DockPanel.Dock="Right" Text="$(if ($open) { '&#xE70E;' } else { '&#xE70D;' })" FontFamily="$FontIcons" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>
+    <TextBlock FontSize="13"><Run Text="At limit" FontWeight="SemiBold" Foreground="$($Theme.fg)"/><Run Text="  $(@($limited).Count)" Foreground="$($Theme.sub)"/></TextBlock>
+  </DockPanel>
+</Border>
+"@)
+  $head.Add_MouseLeftButtonUp({ $script:state.limitedOpen = -not ($script:state.limitedOpen -ne $false); Save-State; Update-Popup -ListOnly })
+  [void]$box.Children.Add($head)
+  if ($open) { foreach ($c in @($limited)) { [void]$box.Children.Add((New-LimitedRow $c)) } }
+}
+
 # The account list (the popup). Settings is its own window: Update-Settings. Edit flows call this to refresh both;
 # -ListOnly leaves an open Settings window alone (rebuilding it would take the focus from someone typing).
 function Update-Popup([switch]$ListOnly) {
@@ -1523,112 +2115,97 @@ function Update-Popup([switch]$ListOnly) {
   $PopupEls.Status.Text = if ($script:job) { if ($script:job.discover) { "Scanning for accounts$ELL" } else { "Refreshing$ELL" } }
     elseif ($script:lastError) { "Error: $($script:lastError)" }
     elseif ($script:configError) { $script:configError }
-    elseif ($script:updated) { "Updated {0:HH:mm} $DOT every {1} min{2}" -f $script:updated, (Get-RefreshMinutes), $(if ($script:notice) { " $DOT $($script:notice)" }) }
+    elseif ($script:updated) { "Updated $(Format-ClockShort $script:updated (Get-TimeFormat)) $DOT every {0} min{1}" -f (Get-RefreshMinutes), $(if ($script:notice) { " $DOT $($script:notice)" }) }
     else { '' }
   $PopupEls.Status.Foreground = if (-not $script:job -and ($script:lastError -or $script:configError)) { $Colors.bad } else { $Theme.sub }
 
   $PopupEls.UpdBox.Visibility = if ($script:update) { 'Visible' } else { 'Collapsed' }
-  if ($script:update) {
-    $PopupEls.UpdTitle.Text = "Update available: v$($script:update.version) (you have v$AppVersion)"
-    $PopupEls.UpdNotes.Text = "$($script:update.notes)"
-    $PopupEls.UpdNotes.Visibility = if ($script:update.notes) { 'Visible' } else { 'Collapsed' }
-  }
   Update-UpdateControls
 
   $PopupEls.List.Children.Clear()
-  $shown = @(Get-TaskbarCfgs | ForEach-Object name)
-  $cfgs = Get-Visible
-  foreach ($cfg in $cfgs) { [void]$PopupEls.List.Children.Add((New-AccountRow $cfg $shown $false)) }
-  if (-not @($cfgs).Count) {
+  $cfgs = @(Get-Visible)
+  $limitedAll = @($cfgs | Where-Object { Test-Limited (Get-Result $_.name) })
+  # Grouped (default): limited accounts leave the blocks and sit under "At limit", soonest back first.
+  $grouped = @()
+  if ("$($script:config.listLimited)" -ne 'inline') { $grouped = @($limitedAll | Sort-Object { $b = Get-BackAt (Get-Result $_.name); if ($b) { $b.Ticks } else { [int64]::MaxValue } }) }
+  $avail = @($cfgs | Where-Object { $n = $_.name; -not @($grouped | Where-Object name -eq $n).Count })
+  foreach ($cfg in $avail) { [void]$PopupEls.List.Children.Add((New-ListBlock $cfg)) }
+  if (-not $cfgs.Count) {
     $empty = New-Object Windows.Controls.TextBlock
     $empty.Text = if ($script:job) { "Looking for accounts$ELL" } else { 'No accounts found. Log in with Claude Code (run claude), then right-click the rings > Scan for accounts.' }
-    $empty.Foreground = $Theme.sub; $empty.Margin = '10,8'; $empty.TextWrapping = 'Wrap'
+    $empty.Foreground = $Theme.sub; $empty.Margin = '4,8'; $empty.TextWrapping = 'Wrap'
     [void]$PopupEls.List.Children.Add($empty)
   }
+  Update-Summary (@($cfgs).Count - $limitedAll.Count) $limitedAll.Count $cfgs.Count
+  Update-LimitedBox $grouped
   Update-NewAcctBox
-  Update-Legend
-  $PopupEls.Footer.Text = "Hover a ring for details $DOT Ctrl+drag the rings to move them $DOT choose accounts in Settings"
-  if (-not $ListOnly -and $script:editing -and $settings.IsVisible) { Update-Settings }
+  # The how-to line is for newcomers: the first three times the list opens.
+  $PopupEls.Footer.Text = "Ctrl+drag to move $DOT right-click for more"
+  $PopupEls.Footer.Visibility = if ([int]$script:state.hintCount -lt 3) { 'Visible' } else { 'Collapsed' }
+  if (-not $ListOnly -and $settings.IsVisible) { Update-Settings }
 }
 
-# The Settings window: the active tab's panel, and the values every control starts from.
+$PageNames = @{ task = 'PanTask'; list = 'PanList'; acct = 'PanAcct'; gen = 'PanGen' }
+$PageTitles = @{ task = 'Taskbar'; list = 'Usage list'; acct = 'Accounts'; gen = 'General' }
+$script:loadingSettings = $false
+
+function Set-ComboItems($combo, $items, $selected) {
+  $combo.Items.Clear()
+  foreach ($it in $items) { [void]$combo.Items.Add((New-Object Windows.Controls.ComboBoxItem -Property @{ Content = $it[1]; Tag = $it[0] })) }
+  $combo.SelectedIndex = [Math]::Max(0, [array]::IndexOf(@($items | ForEach-Object { "$($_[0])" }), "$selected"))
+}
+
+# The Settings window: the open page, and the value every control starts from. Handlers ignore changes made here ($script:loadingSettings).
 function Update-Settings {
-  $acct = $script:tab -eq 'acct'
-  $PopupEls.SList.Children.Clear()
-  $shown = @(Get-TaskbarCfgs | ForEach-Object name)
-  $cfgs = Get-Visible
-  if (@($cfgs).Count -and (-not $script:expanded -or @($cfgs | Where-Object name -eq $script:expanded).Count -eq 0)) { $script:expanded = @($cfgs)[0].name }
-  # Accounts tab: one chip per account (dimmed when it is not on the taskbar), and the picked account's details below.
-  $PopupEls.AcctChips.Children.Clear()
-  if ($acct) {
-    foreach ($cfg in $cfgs) {
-      $chip = New-Object Windows.Controls.RadioButton -Property @{ Content = (Get-Label $cfg); GroupName = 'acctchip'; Tag = $cfg.name; FontSize = 12.5; Margin = '0,0,0,4'; IsChecked = ($script:expanded -eq $cfg.name) }
-      $chip.Style = $PopupEls.Card.Resources['Seg']
-      if ($shown -notcontains $cfg.name) { $chip.Opacity = 0.6; $chip.ToolTip = 'Not on the taskbar' }
-      $chip.Add_Checked({ param($s) if ($script:expanded -ne $s.Tag) { $script:expanded = $s.Tag; Update-Settings } })
-      [void]$PopupEls.AcctChips.Children.Add($chip)
+  $script:loadingSettings = $true
+  try {
+    foreach ($t in $PageNames.Keys) {
+      $PopupEls[$PageNames[$t]].Visibility = if ($script:tab -eq $t) { 'Visible' } else { 'Collapsed' }
+      $PopupEls["Tab_$t"].IsChecked = $script:tab -eq $t
     }
-    foreach ($cfg in $cfgs) { if ($cfg.name -eq $script:expanded) { [void]$PopupEls.SList.Children.Add((New-AccountRow $cfg $shown $true)) } }
-  }
-  $script:loadingCaptions = $true
-  foreach ($k in $LimitKeys) { $PopupEls["Cap_$k"].Text = Get-Caption $k }
-  $PopupEls.OptDividers.IsChecked = $script:config.showDividers -eq $true
-  $PopupEls.OptHideLimit.IsChecked = $script:config.hideAtLimit -eq $true
-  $PopupEls.OptLegend.IsChecked = $script:config.showLegend -eq $true
-  $PopupEls["Nm_$(Get-NamesMode)"].IsChecked = $true
-  $PopupEls["Sp_$(Get-SpacingKey)"].IsChecked = $true
-  $PopupEls["Iw_$(Get-PieKey $null)"].IsChecked = $true
-  $PopupEls["Sz_$(Get-SizeKey)"].IsChecked = $true
-  $PopupEls["In_$(Get-InsideMode)"].IsChecked = $true
-  $PopupEls["Nx_$(Get-NextMode)"].IsChecked = $true
-  $PopupEls.OptAnim.IsChecked = Test-Option 'animations'
-  $PopupEls.OptUpdates.IsChecked = Test-Option 'updateCheck'
-  Update-UpdateControls
-  $PopupEls.OptRefresh.Text = "$(Get-RefreshMinutes)"
-  $script:loadingCaptions = $false
-  foreach ($t in 'acct', 'disp', 'cap', 'upd') {
-    $PopupEls["Pan$((Get-Culture).TextInfo.ToTitleCase($t))"].Visibility = if ($script:tab -eq $t) { 'Visible' } else { 'Collapsed' }
-    $PopupEls["Tab_$t"].IsChecked = $script:tab -eq $t
-  }
-  if ($acct) { Show-AcctTool }
-  Update-NewAcctBox
-  Update-SettingsButtons
-}
+    $PopupEls.PageTitle.Text = $PageTitles[$script:tab]
+    $PopupEls.PageActions.Visibility = if ($script:tab -eq 'acct') { 'Visible' } else { 'Collapsed' }
 
-# Apply is live only while something differs from the last saved state.
-function Update-SettingsButtons {
-  $dirty = $script:editing -and $script:configBackup -and (($script:config | ConvertTo-Json -Depth 8) -ne $script:configBackup)
-  $PopupEls.SApplyBtn.IsEnabled = [bool]$dirty
-}
-
-# One line under the list: which ring is which on the taskbar, and what the colours mean.
-function Update-Legend {
-  $t = $PopupEls.Legend
-  $t.Inlines.Clear()
-  # Off by default (Settings > Display > legend): the hover text on the rings says the same.
-  $t.Visibility = if ($script:config.showLegend -eq $true) { 'Visible' } else { 'Collapsed' }
-  if ($script:config.showLegend -ne $true) { return }
-  $cfgs = @(Get-TaskbarCfgs)
-  $parts = @()
-  $isComb = { param($c) $c.style -eq 'combined' -and -not (Test-NoFiveH (Get-Result $c.name)) }
-  $pies = @($cfgs | Where-Object { & $isComb $_ } | ForEach-Object { Get-PieKey $_ } | Select-Object -Unique)
-  if ($pies.Count -eq 1) {
-    $parts += "Inner $(Get-Caption $pies[0]), outer $(Get-Caption $(if ($pies[0] -eq '5h') { '7d' } else { '5h' }))"
-  } elseif ($pies.Count -gt 1) { $parts += 'Inner and outer: hover a dial' }
-  $ringKeys = @($cfgs | Where-Object { -not (& $isComb $_) } | ForEach-Object { Get-ShownLimits $_ (Get-Result $_.name) })
-  $ringKeys = @($LimitKeys | Where-Object { $ringKeys -contains $_ })
-  if ($ringKeys.Count -gt 1) { $parts += "Rings left to right: $(($ringKeys | ForEach-Object { Get-Caption $_ }) -join ', ')" }
-  if ($parts.Count) {
-    $t.Inlines.Add((New-Object Windows.Documents.Run($parts -join " $DOT ")))
-    $t.Inlines.Add((New-Object Windows.Documents.LineBreak))
-  }
-  $nb = [string][char]0x00A0
-  foreach ($c in @(@($Colors.ok, "under${nb}70%   "), @($Colors.warn, "70%+   "), @($Colors.bad, '90%+'))) {
-    $dot = New-Object Windows.Documents.Run([string][char]0x25CF)
-    $dot.Foreground = $c[0]
-    $t.Inlines.Add($dot)
-    $t.Inlines.Add((New-Object Windows.Documents.Run("$nb$($c[1])")))
-  }
+    # Taskbar
+    $look = Get-LookKey
+    foreach ($k in 'minimal', 'balanced', 'detailed') { $PopupEls["Lk_$k"].IsChecked = ($look -eq $k) }
+    $PopupEls.LookCustom.Visibility = if ($look -eq 'custom') { 'Visible' } else { 'Collapsed' }
+    $on5 = $script:config.show5h -ne $false
+    $PopupEls.Sw_show5h.IsChecked = $on5
+    $PopupEls.Show5Text.Text = if ($on5) { 'On' } else { 'Off' }
+    $have = @(Get-Visible | Where-Object { Test-HasFiveH (Get-Result $_.name) } | ForEach-Object { Get-Label $_ })
+    $PopupEls.Show5Sub.Text = if ($have.Count) { "Only accounts that have one: $($have -join ', ')" } else { 'None of your accounts has one now' }
+    Set-ComboItems $PopupEls.Cb_atLimit @(@('group', 'Group'), @('show', 'Show'), @('hide', 'Hide')) (Get-AtLimitMode)
+    $PopupEls.AtLimitSub.Text = switch (Get-AtLimitMode) { 'group' { 'One red ring with the count, until the first comes back' } 'show' { 'Each stays on the taskbar as a full red ring' } default { 'They leave the taskbar until their window resets' } }
+    $PopupEls["Sz_$(Get-SizeKey)"].IsChecked = $true
+    $PopupEls["In_$(Get-InsideMode)"].IsChecked = $true
+    $PopupEls["Nx_$(Get-NextMode)"].IsChecked = $true
+    $PopupEls["Nm_$(Get-NamesMode)"].IsChecked = $true
+    $PopupEls["Sp_$(Get-SpacingKey)"].IsChecked = $true
+    $PopupEls["Iw_$(Get-PieKey $null)"].IsChecked = $true
+    $PopupEls.Sw_dividers.IsChecked = $script:config.showDividers -eq $true
+    # Usage list
+    Set-ComboItems $PopupEls.Cb_listLimited @(@('group', 'Group at the bottom'), @('inline', 'Keep in place')) $(if ("$($script:config.listLimited)" -eq 'inline') { 'inline' } else { 'group' })
+    Set-ComboItems $PopupEls.Cb_listFable @(@('always', 'Always'), @('used', 'When used'), @('never', 'Never')) $(if ("$($script:config.listFable)" -in 'always', 'never') { "$($script:config.listFable)" } else { 'used' })
+    $PopupEls.Sw_listPlan.IsChecked = $script:config.listPlan -ne $false
+    $PopupEls.Sw_anim.IsChecked = Test-Option 'animations'
+    # General
+    $mins = @(5, 10, 15, 30, 60); $cur = Get-RefreshMinutes
+    if ($mins -notcontains $cur) { $mins = @($mins + $cur | Sort-Object) }
+    Set-ComboItems $PopupEls.Cb_refresh @($mins | ForEach-Object { , @($_, "$_ min") }) $cur
+    Set-ComboItems $PopupEls.Cb_timeFormat @(@('12h', "12-hour (3pm)"), @('24h', '24-hour (15:00)')) (Get-TimeFormat)
+    $PopupEls.Sw_startup.IsChecked = [bool](Test-Path $StartupLink)
+    $PopupEls.Sw_updates.IsChecked = Test-Option 'updateCheck'
+    foreach ($k in $LimitKeys) { $PopupEls["Cap_$k"].Text = Get-Caption $k }
+    Update-UpdateControls
+    # Accounts
+    $PopupEls.SList.Children.Clear()
+    $shown = @(Get-TaskbarCfgs | ForEach-Object name)
+    foreach ($cfg in @(Get-Visible)) { [void]$PopupEls.SList.Children.Add((New-AccountSettingsRow $cfg $shown)) }
+    Show-AcctTool
+    Update-NewAcctBox
+  } finally { $script:loadingSettings = $false }
+  Update-Preview
 }
 
 # Accounts found on this PC that the widget doesn't have yet (minus the ones the user chose to ignore).
@@ -1645,10 +2222,8 @@ function Add-NewAcct($a) {
     if ($a.dir) { $o.dir = $a.dir }
     Add-AcctCfg $o
   }
-  if (-not $script:editing) {
-    Save-UiConfig
-    $script:lastTry = [DateTime]::MinValue; Start-Refresh
-  }
+  Save-UiConfig
+  $script:lastTry = [DateTime]::MinValue; Start-Refresh
   Update-NewAccts; Update-Widget; Update-Popup
 }
 
@@ -1689,16 +2264,35 @@ function Move-Account([string]$name, [int]$by) {
   if ($i -lt 0 -or $j -lt 0 -or $j -ge $all.Count) { return }
   $t = $all[$i]; $all[$i] = $all[$j]; $all[$j] = $t
   $script:config.accounts = $all
-  Save-UiConfig  # while Settings is open this waits for Save, like every other edit
+  Save-UiConfig
   Update-Widget
   Update-Popup
 }
+
+# Drag and drop: put $name where $target is now.
+function Move-AccountTo([string]$name, [string]$target) {
+  $all = @(Get-AcctCfgs)
+  $mv = $all | Where-Object name -eq $name | Select-Object -First 1
+  if (-not $mv -or $name -eq $target) { return }
+  $rest = [System.Collections.ArrayList]@($all | Where-Object name -ne $name)
+  $at = [array]::IndexOf(@($rest | ForEach-Object name), $target)
+  if ($at -lt 0) { return }
+  if ([array]::IndexOf(@($all | ForEach-Object name), $name) -lt [array]::IndexOf(@($all | ForEach-Object name), $target)) { $at++ }   # dragging down lands after the row it was dropped on
+  $rest.Insert($at, $mv)
+  $script:config.accounts = @($rest)
+  Save-UiConfig
+  Update-Widget
+  Update-Popup
+}
+
+# ---------------------------------------------------------------- settings handlers
+# Every control writes the config and refreshes the taskbar at once; Update-Settings fills them under $script:loadingSettings.
 
 foreach ($k in $LimitKeys) {
   $PopupEls["Cap_$k"].Tag = $k
   $PopupEls["Cap_$k"].Add_TextChanged({
     param($s)
-    if ($script:loadingCaptions) { return }
+    if ($script:loadingSettings) { return }
     if (-not $script:config.captions) { $script:config | Add-Member -Force captions ([pscustomobject]$DefaultCaptions) }
     $script:config.captions | Add-Member -Force -NotePropertyName $s.Tag -NotePropertyValue $s.Text
     Save-UiConfig
@@ -1706,52 +2300,85 @@ foreach ($k in $LimitKeys) {
   })
 }
 
-foreach ($choice in @(@('Sz', 'size', 'compact', 'normal', 'large'), @('In', 'inside', 'none', 'initials', 'percent'), @('Nx', 'next', 'none', 'caption', 'percent', 'resetin', 'resetat'),
+# The Look tiles.
+foreach ($k in 'minimal', 'balanced', 'detailed') {
+  $PopupEls["Lk_$k"].Tag = $k
+  $PopupEls["Lk_$k"].Add_Checked({ param($s) if ($script:loadingSettings) { return }; $script:config | Add-Member -Force look $s.Tag; Save-UiConfig; Update-Widget; Update-Settings })
+}
+# More options: any of them switches the Look to custom (keeping what the old Look showed) and then changes its own key.
+foreach ($choice in @(@('Sz', 'size', 'compact', 'normal', 'large'), @('In', 'inside', 'none', 'initials', 'percent'), @('Nx', 'next', 'none', 'caption', 'percent', 'usage', 'resetin', 'resetat'),
     @('Nm', 'names', 'left', 'right', 'hidden'), @('Sp', 'spacing', 'tight', 'normal', 'wide'), @('Iw', 'innerWindow', '5h', '7d'))) {
   foreach ($v in $choice[2..($choice.Count - 1)]) {
     $rb = $PopupEls["$($choice[0])_$v"]
     $rb.Tag = @{ key = $choice[1]; value = $v }
     $rb.Add_Checked({
       param($s)
-      if ($script:loadingCaptions) { return }
-      $script:config | Add-Member -Force -NotePropertyName $s.Tag.key -NotePropertyValue $s.Tag.value
+      if ($script:loadingSettings) { return }
+      Set-LookOption $s.Tag.key $s.Tag.value
       # A global inner-ring choice replaces any per-account one, so every dial follows it.
       if ($s.Tag.key -eq 'innerWindow') { foreach ($a in @(Get-AcctCfgs)) { if ($a.pie) { Set-AcctProp $a.name 'pie' '' } } }
       Save-UiConfig
       Update-Widget
+      Update-Settings
     })
   }
 }
-foreach ($opt in @(@('OptDividers', 'showDividers'), @('OptHideLimit', 'hideAtLimit'), @('OptLegend', 'showLegend'), @('OptAnim', 'animations'), @('OptUpdates', 'updateCheck'))) {
+$PopupEls.Sw_dividers.Add_Click({ param($s) Set-LookOption 'showDividers' ([bool]$s.IsChecked); Save-UiConfig; Update-Widget; Update-Settings })
+
+# Show the 5-hour window, and what happens to accounts at their limit.
+$PopupEls.Sw_show5h.Add_Click({ param($s) $script:config | Add-Member -Force show5h ([bool]$s.IsChecked); Save-UiConfig; Update-Widget; Update-Popup -ListOnly; Update-Settings })
+$PopupEls.Cb_atLimit.Add_SelectionChanged({ param($s) if ($script:loadingSettings -or -not $s.SelectedItem) { return }; $script:config | Add-Member -Force atLimit $s.SelectedItem.Tag; Save-UiConfig; Update-Widget; Update-Settings })
+
+# Usage list.
+$PopupEls.Cb_listLimited.Add_SelectionChanged({ param($s) if ($script:loadingSettings -or -not $s.SelectedItem) { return }; $script:config | Add-Member -Force listLimited $s.SelectedItem.Tag; Save-UiConfig; Update-Popup -ListOnly })
+$PopupEls.Cb_listFable.Add_SelectionChanged({ param($s) if ($script:loadingSettings -or -not $s.SelectedItem) { return }; $script:config | Add-Member -Force listFable $s.SelectedItem.Tag; Save-UiConfig; Update-Popup -ListOnly })
+foreach ($opt in @(@('Sw_listPlan', 'listPlan'), @('Sw_anim', 'animations'), @('Sw_updates', 'updateCheck'))) {
   $PopupEls[$opt[0]].Tag = $opt[1]
-  $PopupEls[$opt[0]].Add_Click({
-    param($s)
-    $script:config | Add-Member -Force -NotePropertyName $s.Tag -NotePropertyValue ([bool]$s.IsChecked)
-    Save-UiConfig
-    Update-Widget
-  })
+  $PopupEls[$opt[0]].Add_Click({ param($s) $script:config | Add-Member -Force -NotePropertyName $s.Tag -NotePropertyValue ([bool]$s.IsChecked); Save-UiConfig; Update-Popup -ListOnly })
 }
-# Minutes between refreshes: saved once it's a whole number from 5 to 1440; leaving the box restores the saved value.
-$PopupEls.OptRefresh.Add_TextChanged({
+
+# General.
+$PopupEls.Cb_refresh.Add_SelectionChanged({ param($s) if ($script:loadingSettings -or -not $s.SelectedItem) { return }; $script:config | Add-Member -Force refreshMinutes ([int]$s.SelectedItem.Tag); Save-UiConfig; Update-Popup -ListOnly })
+$PopupEls.Cb_timeFormat.Add_SelectionChanged({ param($s) if ($script:loadingSettings -or -not $s.SelectedItem) { return }; $script:config | Add-Member -Force timeFormat $s.SelectedItem.Tag; Save-UiConfig; Update-Widget; Update-Popup -ListOnly })
+$PopupEls.Sw_startup.Add_Click({
   param($s)
-  if ($script:loadingCaptions) { return }
-  $m = 0
-  if ([int]::TryParse($s.Text.Trim(), [ref]$m) -and $m -ge 5 -and $m -le 1440) {
-    $script:config | Add-Member -Force refreshMinutes $m
-    Save-UiConfig
+  if ($Demo) { return }
+  if ($s.IsChecked) { New-LauncherShortcut $StartupLink $PSScriptRoot } elseif (Test-Path $StartupLink) { Remove-Item $StartupLink }
+})
+$PopupEls.OpenCfgBtn.Add_Click({
+  Flush-UiConfig
+  if (-not $Demo) {
+    if (-not (Test-Path $ConfigPath)) { Save-Config $script:config }
+    Start-Process notepad.exe -ArgumentList "`"$ConfigPath`""
   }
 })
-$PopupEls.OptRefresh.Add_LostKeyboardFocus({ param($s) $s.Text = "$(Get-RefreshMinutes)" })
+$PopupEls.ResetBtn.Add_Click({ $PopupEls.ResetBtn.Visibility = 'Collapsed'; $PopupEls.ResetAsk.Visibility = 'Visible' })
+$PopupEls.ResetNo.Add_Click({ $PopupEls.ResetAsk.Visibility = 'Collapsed'; $PopupEls.ResetBtn.Visibility = 'Visible' })
+# Back to the defaults (the accounts, with their own per-account choices, stay).
+$PopupEls.ResetYes.Add_Click({
+  $script:config = New-DefaultConfig @(Get-AcctCfgs)
+  Save-UiConfig; Update-Widget; Update-Popup -ListOnly; Update-Settings
+  $PopupEls.ResetAsk.Visibility = 'Collapsed'; $PopupEls.ResetBtn.Visibility = 'Visible'
+})
+# Folded sections: click the header to open or close.
+foreach ($f in 'More', 'ListMore', 'GenMore') {
+  $PopupEls["$($f)Head"].Tag = $f
+  $PopupEls["$($f)Head"].Add_MouseLeftButtonUp({
+    param($s)
+    $body = $PopupEls["$($s.Tag)Body"]; $chev = $PopupEls["$($s.Tag)Chev"]
+    $open = $body.Visibility -ne 'Visible'
+    $body.Visibility = if ($open) { 'Visible' } else { 'Collapsed' }
+    $chev.Text = if ($open) { [string][char]0xE70E } else { [string][char]0xE70D }
+  })
+}
 
 # ---------------------------------------------------------------- account tools (Settings)
-# Find / Add / Remove change the in-memory config like every other Settings edit: Save keeps it,
-# Cancel drops it. Only references are stored (folder, env var name); a token is never read for display.
-# A pasted token is the exception to "in memory until Save": it goes to the Windows user environment the
-# moment the user approves it (to xndr-claude when installed, else a user variable) and stays even if Settings is
-# cancelled; config.json keeps the variable NAME only.
+# Find / Add / Remove change the config like every other Settings edit, at once. Only references are stored
+# (folder, env var name); a token is never read for display. A pasted token goes to the Windows user environment the
+# moment the user approves it (to xndr-claude when installed, else a user variable); config.json keeps the variable
+# NAME only.
 
 $script:acctMode = $null      # 'find' | 'add' | 'delenv' | $null
-$script:envDrop = @()         # user variables whose delete was approved (applied on Save)
 $script:delEnvVar = $null     # variable the delete prompt is asking about
 $script:acctNote = $null
 $script:acctsChanged = $false
@@ -1777,14 +2404,15 @@ function Get-UniqueName([string]$base) {
 
 function Add-AcctCfg($a) {
   $script:config.accounts = @(Get-AcctCfgs) + @([pscustomobject]$a)
-  $script:acctsChanged = $true
+  Save-UiConfig
+  if (-not $Demo) { $script:lastTry = [DateTime]::MinValue; Start-Refresh }   # a new account has no numbers yet
 }
 
 function Remove-Account([string]$name) {
   $gone = Get-AcctCfg $name
   $script:config.accounts = @(Get-AcctCfgs | Where-Object { $_.name -ne $name })
-  $script:acctsChanged = $true
-  $script:acctNote = "Removed. Save to keep it, Cancel to undo."
+  Save-UiConfig
+  $script:acctNote = "Removed $(Get-Label $gone)."
   # A token the widget saved gets its own approval before the variable is deleted.
   if ($gone.envManaged -eq $true -and "$($gone.env)" -match '^CLAUDE_USAGE_TOKEN_[A-Z0-9_]+$') {
     $script:delEnvVar = "$($gone.env)"; $script:acctMode = 'delenv'
@@ -1844,13 +2472,13 @@ function Complete-Find {
   Update-Widget
   # Rebuilding the whole list under someone typing in Settings would steal their focus.
   if ($popup.IsVisible) { Update-Popup -ListOnly }
-  if ($script:editing -and $settings.IsVisible) { Update-NewAcctBox; if ($script:tab -eq 'acct') { Show-AcctTool } }
+  if ($settings.IsVisible) { Update-NewAcctBox; if ($script:tab -eq 'acct') { Show-AcctTool } }
 }
 
 # On startup and then hourly (see the minute timer): look for accounts the widget doesn't have.
 # Nothing is added on its own; they show as "New account found" with Add / Ignore.
 function Start-AutoFind {
-  if ($Demo -or $script:editing -or $script:findJob) { return }
+  if ($Demo -or $script:findJob) { return }
   Start-Find -Auto
 }
 
@@ -1874,10 +2502,15 @@ function New-ToolBar([string]$addText, [scriptblock]$onAdd) {
 }
 
 function Show-AcctTool {
-  $pan = $PopupEls.AcctTools
-  $pan.Children.Clear()
+  $host2 = $PopupEls.AcctTools
+  $host2.Children.Clear()
   $PopupEls.AcctMsg.Text = "$($script:acctNote)"
   $PopupEls.AcctMsg.Visibility = if ($script:acctNote) { 'Visible' } else { 'Collapsed' }
+  if (-not $script:acctMode) { return }
+  # The open tool sits in a card above the account rows.
+  $pan = New-Object Windows.Controls.StackPanel
+  $card = New-Object Windows.Controls.Border -Property @{ Background = $Theme.row; BorderBrush = $Theme.rowline; BorderThickness = '1'; CornerRadius = '6'; Padding = '16,6,16,14'; Margin = '0,0,0,8'; Child = $pan }
+  [void]$host2.Children.Add($card)
   if ($script:acctMode -eq 'find') { Show-FindTool $pan }
   elseif ($script:acctMode -eq 'add') { Show-AddTool $pan }
   elseif ($script:acctMode -eq 'delenv') { Show-DelEnvTool $pan }
@@ -1897,22 +2530,13 @@ function Show-DelEnvTool($pan) {
 "@)
   $bar.FindName('DKeep').Add_Click({ $script:acctMode = $null; $script:delEnvVar = $null; Show-AcctTool })
   $bar.FindName('DDel').Add_Click({
-    $script:envDrop = @($script:envDrop) + @($script:delEnvVar)
-    $script:acctNote = "Removed. $($script:delEnvVar) is deleted when you Save."
+    $v = $script:delEnvVar
+    if (-not $Demo) { try { Remove-UserEnvToken $v } catch { Write-Log "env var delete failed ($v): $($_.Exception.GetType().Name)" } }
+    $script:acctNote = "Removed. $v is deleted."
     $script:acctMode = $null; $script:delEnvVar = $null
     Show-AcctTool
   })
   [void]$pan.Children.Add($bar)
-}
-
-# Save deletes the variables of accounts the user explicitly removed. Cancel never touches a saved token.
-function Complete-EnvChanges([bool]$keep) {
-  if ($keep) {
-    foreach ($v in @($script:envDrop)) {
-      try { Remove-UserEnvToken $v } catch { Write-Log "env var delete failed ($v): $($_.Exception.GetType().Name)" }
-    }
-  }
-  $script:envDrop = @()
 }
 
 function Show-FindTool($pan) {
@@ -1960,7 +2584,7 @@ function Show-FindTool($pan) {
       $n++
     }
     if ($n) {
-      $script:acctNote = "Added $n account$(if ($n -ne 1) { 's' }). Save to keep $(if ($n -ne 1) { 'them' } else { 'it' })."
+      $script:acctNote = "Added $n account$(if ($n -ne 1) { 's' })."
       $script:acctMode = $null
       Update-Widget
       Update-Popup
@@ -2132,7 +2756,7 @@ function Invoke-AddAccount {
   $o.plan = if ($nf.plan) { $nf.plan } else { $detected }
   Add-AcctCfg $o
   $script:nf = @{ label = ''; src = $nf.src; input = ''; plan = '' }
-  $script:acctNote = "Added $($o.label). Save to keep it."
+  $script:acctNote = "Added $($o.label)."
   $script:acctMode = $null
   Update-Widget
   Update-Popup
@@ -2161,15 +2785,8 @@ function Complete-AddToken([string]$target = 'env') {
   $o = if ($target -eq 'xndr-claude') { [ordered]@{ name = $name; label = $label; plan = $script:nf.plan; source = 'xndr-claude' } }
        else { [ordered]@{ name = $name; label = $label; plan = $script:nf.plan; source = 'env'; env = $var; envManaged = $true } }
   Add-AcctCfg $o
-  # The token is already stored, so its account must survive Cancel/Esc: put it in the Cancel copy and on disk now.
-  if (-not $Demo) {
-    try {
-      $bk = $script:configBackup | ConvertFrom-Json
-      $bk.accounts = @($bk.accounts | Where-Object { $_ }) + @([pscustomobject]$o)
-      $script:configBackup = $bk | ConvertTo-Json -Depth 8
-      Save-Config $bk
-    } catch { Write-Log "save config: $($_.Exception.GetType().Name)" }
-  }
+  # The token is already stored, so its account goes to disk now rather than 400 ms later.
+  Flush-UiConfig
   $script:nf = @{ label = ''; src = 'token'; input = ''; plan = '' }
   $script:acctNote = if ($target -eq 'xndr-claude') { "Saved to xndr-claude as $name." }
                      else { "Saved as user environment variable $var (Windows Settings $([char]0x2192) Environment Variables $([char]0x2192) User variables)" }
@@ -2236,58 +2853,24 @@ function Start-Raise {
   $raiseTimer.Start()
 }
 
-# Settings work on the live config (so the taskbar previews them) with a copy to go back to.
-function Start-Editing {
-  $script:configBackup = $script:config | ConvertTo-Json -Depth 8
-  $script:editing = $true
-  $script:acctMode = $null; $script:acctNote = $null; $script:acctsChanged = $false
-  $script:tab = 'acct'; $script:expanded = $null
-  $script:envDrop = @()
-}
-
-function Stop-Editing([bool]$keep) {
-  if (-not $script:editing) { return }
-  $script:editing = $false
-  $script:acctMode = $null; $script:acctNote = $null
-  if (-not $Demo) { Complete-EnvChanges $keep }
-  if ($keep) { Save-UiConfig }
-  elseif ($script:configBackup) { $script:config = $script:configBackup | ConvertFrom-Json }
-  $script:configBackup = $null
-  Update-NewAccts
-  Update-Widget
-  # New accounts have no numbers yet: read them now rather than at the next timer.
-  if ($keep -and $script:acctsChanged -and -not $Demo) { $script:lastTry = [DateTime]::MinValue; Start-Refresh }
-  $script:acctsChanged = $false
-}
-
-# Apply: keep what has been edited so far and stay in Settings.
-function Save-Editing {
-  if (-not $script:editing) { return }
-  if (-not $Demo) { Complete-EnvChanges $true }
-  $script:editing = $false
-  Save-UiConfig
-  $script:editing = $true
-  $script:configBackup = $script:config | ConvertTo-Json -Depth 8
-  if ($script:acctsChanged -and -not $Demo) { $script:lastTry = [DateTime]::MinValue; Start-Refresh }
-  $script:acctsChanged = $false
-  Update-SettingsButtons
-}
-
-function Show-Settings {
+function Show-Settings([string]$page = '') {
+  if ($page) { $script:tab = $page }
   if ($settings.IsVisible) {
     if ($settings.WindowState -eq 'Minimized') { $settings.WindowState = 'Normal' }
+    Update-Settings
     [void]$settings.Activate()
     return
   }
-  Start-Editing
+  $script:acctMode = $null; $script:acctNote = $null
   Update-Settings
   $settings.Show()
   [void]$settings.Activate()
 }
 
-# OK keeps the edits, Cancel (and Esc, and the close button) undoes them; either way the window is only hidden, so it opens again at the size the user left it.
-function Close-Settings([bool]$keep) {
-  Stop-Editing $keep
+# Changes were applied as they were made; closing (the close button, Esc) only hides the window, so it opens again
+# at the size the user left it.
+function Close-Settings {
+  Flush-UiConfig
   $settings.Hide()
 }
 
@@ -2299,6 +2882,8 @@ function Show-Popup {
   $hideTimer.Stop()
   $popup.BeginAnimation([Windows.Window]::OpacityProperty, $null)
   $popup.Opacity = 0
+  $script:state.hintCount = [int]$script:state.hintCount + 1
+  Save-State
   Update-Popup -ListOnly
   Set-PopupPosition
   $popup.Show()
@@ -2336,25 +2921,21 @@ $popup.Add_KeyDown({
   if ($e.Key -eq 'Escape') { Hide-Popup }
 })
 $PopupEls.RefreshBtn.Add_Click({ Start-Refresh })
-# The update always runs where its status can be seen: the Settings window, Updates tab.
+# The update always runs where its status can be seen: Settings > General.
 $PopupEls.UpdBtn.Add_Click({
   Hide-Popup
-  Show-Settings
-  $script:tab = 'upd'; Update-Settings
+  Show-Settings 'gen'
   Invoke-UpdateNow
 })
 $PopupEls.UpdInstallBtn.Add_Click({ Invoke-UpdateNow })
 $PopupEls.UpdCheckBtn.Add_Click({ Start-UpdateCheck -Manual })
 $PopupEls.EditBtn.Add_Click({ Hide-Popup; Show-Settings })
-$PopupEls.SOkBtn.Add_Click({ Close-Settings $true })
-$PopupEls.SCancelBtn.Add_Click({ Close-Settings $false })
-$PopupEls.SApplyBtn.Add_Click({ Save-Editing })
-$settings.Add_Closing({ param($s, $e) if ($script:exiting) { return }; $e.Cancel = $true; Close-Settings $false })
+$settings.Add_Closing({ param($s, $e) if ($script:exiting) { return }; $e.Cancel = $true; Close-Settings })
 $settings.Add_SourceInitialized({ if (-not $isLight) { [CuwNative]::DarkTitleBar((New-Object Windows.Interop.WindowInteropHelper($settings)).Handle) } })
 $widget.Add_Closing({ $script:exiting = $true })
-$settings.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Escape') { Close-Settings $false } })
+$settings.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Escape') { Close-Settings } })
 $script:exiting = $false
-foreach ($t in 'acct', 'disp', 'cap', 'upd') {
+foreach ($t in 'task', 'list', 'acct', 'gen') {
   $PopupEls["Tab_$t"].Tag = $t
   $PopupEls["Tab_$t"].Add_Checked({ param($s) if ($script:tab -ne $s.Tag) { $script:tab = $s.Tag; Update-Settings } })
 }
@@ -2364,7 +2945,7 @@ foreach ($t in 'acct', 'disp', 'cap', 'upd') {
 function Update-All {
   Update-Widget
   if ($popup.IsVisible) { Update-Popup -ListOnly }
-  if ($script:forcePopup -and $script:editing -and $settings.IsVisible -and -not ([Windows.Input.Keyboard]::FocusedElement -is [Windows.Controls.Primitives.TextBoxBase])) { Update-Settings }
+  if ($script:forcePopup -and $settings.IsVisible -and $script:acctMode -ne 'add' -and -not ([Windows.Input.Keyboard]::FocusedElement -is [Windows.Controls.Primitives.TextBoxBase] -or [Windows.Input.Keyboard]::FocusedElement -is [Windows.Controls.PasswordBox])) { Update-Settings }
   $script:forcePopup = $false
 }
 
@@ -2440,7 +3021,6 @@ $widget.ContextMenu = $menu
 # ---------------------------------------------------------------- snapshot (README images)
 
 function Save-Snapshot([string]$file, [scriptblock]$after) {
-  $script:editing = $false
   Update-Widget
   Update-Popup -ListOnly
   if ($after) { & $after }
@@ -2448,7 +3028,7 @@ function Save-Snapshot([string]$file, [scriptblock]$after) {
     if ($el.Parent -is [Windows.Window]) { $el.Parent.Content = $null }
     elseif ($el.Parent) { $el.Parent.Content = $null }
   }
-  $PopupEls.Card.Width = 380
+  $PopupEls.Card.Width = 372
   $scene = [Windows.Markup.XamlReader]::Parse(@"
 <Border $ns Width="820" CornerRadius="14" ClipToBounds="True" TextOptions.TextRenderingMode="Grayscale"
         TextElement.FontFamily="Segoe UI Variable Text, Segoe UI">
@@ -2458,11 +3038,11 @@ function Save-Snapshot([string]$file, [scriptblock]$after) {
     </LinearGradientBrush>
   </Border.Background>
   <DockPanel>
-    <Border DockPanel.Dock="Bottom" Height="48" Background="#F21C1C1C">
+    <Border DockPanel.Dock="Bottom" Height="48" Background="$($Theme.tb)">
       <DockPanel LastChildFill="False">
         <StackPanel DockPanel.Dock="Right" Margin="0,0,16,0" VerticalAlignment="Center">
-          <TextBlock Text="11:46" Foreground="White" FontSize="11.5" HorizontalAlignment="Right"/>
-          <TextBlock Text="2026-09-29" Foreground="White" FontSize="11.5" HorizontalAlignment="Right"/>
+          <TextBlock Text="11:46" Foreground="$($Theme.fg)" FontSize="11.5" HorizontalAlignment="Right"/>
+          <TextBlock Text="2026-09-29" Foreground="$($Theme.fg)" FontSize="11.5" HorizontalAlignment="Right"/>
         </StackPanel>
         <ContentControl Name="Slot" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="0,0,60,0"/>
       </DockPanel>
@@ -2488,32 +3068,48 @@ function Save-Snapshot([string]$file, [scriptblock]$after) {
 }
 
 # The Settings window's content at its default size, rendered at $scale display scaling (no window frame).
-function Save-SettingsSnapshot([string]$file, [double]$scale, [scriptblock]$after) {
-  $script:editing = $true
-  if (-not $script:configBackup) { $script:configBackup = $script:config | ConvertTo-Json -Depth 8 }
+function Save-SettingsSnapshot([string]$file, [double]$scale, [scriptblock]$after, [double]$height = 0) {
+  if (-not $height) { $height = $settings.Height }
+  $script:previewForce = $true
   Update-Widget
   Update-Settings
   if ($after) { & $after }
   $dpi = New-Object Windows.DpiScale($scale, $scale)
   $grid = $settings.Content
   $settings.Content = $null
-  $shot = New-Object Windows.Controls.Border -Property @{ Width = $settings.Width; Height = $settings.Height; Background = $Theme.card; Child = $grid }
+  # A drawn title bar over the window content, like the real window frame.
+  $frame = [Windows.Markup.XamlReader]::Parse(@"
+<DockPanel $ns Background="$($Theme.win)">
+  <Border DockPanel.Dock="Top" Height="32" Background="$($Theme.win)">
+    <DockPanel>
+      <TextBlock DockPanel.Dock="Right" Text="&#xE921;    &#xE922;    &#xE8BB;" FontFamily="$FontIcons" FontSize="10" Foreground="$($Theme.fg)" VerticalAlignment="Center" Margin="0,0,18,0"/>
+      <Ellipse DockPanel.Dock="Left" Width="14" Height="14" Stroke="$($Colors.accent)" StrokeThickness="3" Margin="14,0,10,0"/>
+      <TextBlock Text="Claude Usage Widget settings" FontSize="12" Foreground="$($Theme.fg)" VerticalAlignment="Center"/>
+    </DockPanel>
+  </Border>
+  <ContentControl Name="Body"/>
+</DockPanel>
+"@)
+  $frame.FindName('Body').Content = $grid
+  $shot = New-Object Windows.Controls.Border -Property @{ Width = $settings.Width; Height = $height; Background = $Theme.win; Child = $frame }
   $shot.Resources.MergedDictionaries.Add($PopupEls.Card.Resources)
   $shot.SetValue([Windows.Documents.TextElement]::ForegroundProperty, (New-Object Windows.Media.BrushConverter).ConvertFromString($Theme.fg))
   $shot.SetValue([Windows.Documents.TextElement]::FontFamilyProperty, (New-Object Windows.Media.FontFamily('Segoe UI Variable Text, Segoe UI')))
   $shot.UseLayoutRounding = $true
   [Windows.Media.VisualTreeHelper]::SetRootDpi($shot, $dpi)
-  $shot.Measure((New-Object Windows.Size($settings.Width, $settings.Height)))
-  $shot.Arrange((New-Object Windows.Rect(0, 0, $settings.Width, $settings.Height)))
+  $shot.Measure((New-Object Windows.Size($settings.Width, $height)))
+  $shot.Arrange((New-Object Windows.Rect(0, 0, $settings.Width, $height)))
   $shot.UpdateLayout()
-  $rtb = New-Object Windows.Media.Imaging.RenderTargetBitmap([int][Math]::Ceiling($settings.Width * $scale), [int][Math]::Ceiling($settings.Height * $scale), (96 * $scale), (96 * $scale), ([Windows.Media.PixelFormats]::Pbgra32))
+  $rtb = New-Object Windows.Media.Imaging.RenderTargetBitmap([int][Math]::Ceiling($settings.Width * $scale), [int][Math]::Ceiling($height * $scale), (96 * $scale), (96 * $scale), ([Windows.Media.PixelFormats]::Pbgra32))
   $rtb.Render($shot)
   $enc = New-Object Windows.Media.Imaging.PngBitmapEncoder
   $enc.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($rtb))
   $fs = [IO.File]::Create($file)
   try { $enc.Save($fs) } finally { $fs.Close() }
+  $frame.FindName('Body').Content = $null
   $shot.Child = $null
   $settings.Content = $grid
+  $script:previewForce = $false
 }
 
 # The taskbar strip alone, laid out and rendered as at $scale display scaling, with an optional tooltip above it.
@@ -2525,11 +3121,11 @@ function Save-BarSnapshot([string]$file, [double]$scale, [string]$tip) {
   $scene = [Windows.Markup.XamlReader]::Parse(@"
 <StackPanel $ns Background="#2E3257" TextElement.FontFamily="Segoe UI Variable Text, Segoe UI" UseLayoutRounding="True">
   <ContentControl Name="TipSlot" HorizontalAlignment="Left" Margin="40,12,12,8"/>
-  <Border Height="48" Background="#F21C1C1C" Padding="24,0,24,0">
+  <Border Height="48" Background="$($Theme.tb)" Padding="24,0,24,0">
     <DockPanel LastChildFill="False">
       <StackPanel DockPanel.Dock="Right" Margin="40,0,0,0" VerticalAlignment="Center">
-        <TextBlock Text="11:46" Foreground="White" FontSize="11.5" HorizontalAlignment="Right"/>
-        <TextBlock Text="2026-10-13" Foreground="White" FontSize="11.5" HorizontalAlignment="Right"/>
+        <TextBlock Text="11:46" Foreground="$($Theme.fg)" FontSize="11.5" HorizontalAlignment="Right"/>
+        <TextBlock Text="2026-10-13" Foreground="$($Theme.fg)" FontSize="11.5" HorizontalAlignment="Right"/>
       </StackPanel>
       <ContentControl Name="Slot" DockPanel.Dock="Right" VerticalAlignment="Center"/>
     </DockPanel>
@@ -2582,6 +3178,7 @@ function Measure-RingSweep($el, [double]$r, [double]$c, [double]$expected) {
 
 if ($RingCheck) {
   Set-DemoData
+  $script:config | Add-Member -Force look 'custom'   # the Looks fix size / inside; custom reads the values set below
   $failed = 0
   foreach ($preset in 'compact', 'normal', 'large') {
   $script:config | Add-Member -Force size $preset
@@ -2612,166 +3209,87 @@ if ($RingCheck) {
 }
 
 if ($Snapshot) {
+  # CUW_THEME=light renders the light theme; file names end in -dark / -light so both sets can share a folder.
+  $tn = if ($isLight) { 'light' } else { 'dark' }
   New-Item -ItemType Directory -Force $Snapshot | Out-Null
   Set-DemoData
   Set-DemoUpdate
-  Save-Snapshot (Join-Path $Snapshot 'widget.png')
-  Save-SettingsSnapshot (Join-Path $Snapshot 'settings.png') 1
-  # Settings tabs with five accounts and a new-account notice, at 100% and 150% display scaling (used to check the layout).
-  $script:config.accounts = @($script:config.accounts) + @(
-    [pscustomobject]@{ name = 'cs'; label = 'CasinoStreamers'; plan = ''; source = 'xndr-claude' }
-    [pscustomobject]@{ name = 'node'; label = 'Node'; plan = ''; source = 'xndr-claude' }
-  )
-  Set-DemoFound
-  $script:found = @($script:found | Select-Object -First 1)
-  Update-NewAccts
-  foreach ($scale in 1, 1.5) {
-    foreach ($t in 'acct', 'disp', 'cap', 'upd') {
-      $script:tab = $t
-      Save-SettingsSnapshot (Join-Path $Snapshot "settings-tab-$t-$([int]($scale * 100)).png") $scale
-    }
+  $script:state.hintCount = 3
+  # The list popup over a taskbar.
+  Save-Snapshot (Join-Path $Snapshot "popup-$tn.png")
+  # The taskbar strip in every Look, with the 5h window off, with accounts at their limit shown or hidden, and hover text;
+  # at 100 / 125 / 150% display scale (checked against the mock-ups).
+  $now = [DateTime]::UtcNow
+  foreach ($look in 'minimal', 'balanced', 'detailed') {
+    $script:config | Add-Member -Force look $look
+    foreach ($scale in 1, 1.25, 1.5) { Save-BarSnapshot (Join-Path $Snapshot "bar-$look-$([int]($scale * 100))-$tn.png") $scale $null }
   }
-  $script:tab = 'acct'; $script:newAccts = @()
-  # Account tools open (used to check the layout; not part of the README).
+  $script:config | Add-Member -Force look 'balanced'
+  $script:config | Add-Member -Force show5h $false
+  foreach ($scale in 1, 1.25, 1.5) { Save-BarSnapshot (Join-Path $Snapshot "bar-no5h-$([int]($scale * 100))-$tn.png") $scale $null }
+  $script:config | Add-Member -Force show5h $true
+  Save-BarSnapshot (Join-Path $Snapshot "bar-hover-group-$tn.png") 1 (Get-AccountTipFor '__limit__')
+  Save-BarSnapshot (Join-Path $Snapshot "bar-hover-account-$tn.png") 1 (Get-AccountTipFor 'side')
+  foreach ($al in 'show', 'hide') {
+    $script:config | Add-Member -Force atLimit $al
+    Save-BarSnapshot (Join-Path $Snapshot "bar-atlimit-$al-$tn.png") 1 $null
+  }
+  $script:config | Add-Member -Force atLimit 'group'
+  $script:config | Add-Member -Force timeFormat '24h'
+  Save-BarSnapshot (Join-Path $Snapshot "bar-24h-$tn.png") 1 $null
+  $script:config | Add-Member -Force timeFormat '12h'
+  # Legacy Beside-the-ring choices still work (custom Look).
+  Set-LookOption 'next' 'resetat'
+  Save-BarSnapshot (Join-Path $Snapshot "bar-custom-resetat-$tn.png") 1 $null
+  $script:config | Add-Member -Force look 'balanced'
+  # Settings, every page, at 100% (and Taskbar at 125 / 150% for the layout check).
+  $script:newAccts = @()
+  foreach ($page in 'task', 'list', 'acct', 'gen') {
+    $script:tab = $page
+    $script:expanded = if ($page -eq 'acct') { 'side' } else { $null }
+    Save-SettingsSnapshot (Join-Path $Snapshot "settings-$page-$tn.png") 1
+  }
+  $script:tab = 'task'; $script:expanded = $null
+  foreach ($scale in 1.25, 1.5) { Save-SettingsSnapshot (Join-Path $Snapshot "settings-task-$([int]($scale * 100))-$tn.png") $scale }
+  $script:tab = 'task'
+  Save-SettingsSnapshot (Join-Path $Snapshot "settings-task-more-$tn.png") 1 { $PopupEls.MoreBody.Visibility = 'Visible' } 1100
+  $PopupEls.MoreBody.Visibility = 'Collapsed'
+  Set-LookOption 'next' 'caption'
+  Save-SettingsSnapshot (Join-Path $Snapshot "settings-task-custom-$tn.png") 1
+  $script:config | Add-Member -Force look 'balanced'
+  # Account tools open: find (with a new-account notice), add, and the token approval line (fake value).
+  $script:tab = 'acct'; $script:expanded = $null
   Set-DemoFound
   $script:acctMode = 'find'
-  Save-SettingsSnapshot (Join-Path $Snapshot 'settings-find.png') 1
+  Save-SettingsSnapshot (Join-Path $Snapshot "settings-find-$tn.png") 1
   $script:acctMode = 'add'
-  Save-SettingsSnapshot (Join-Path $Snapshot 'settings-add.png') 1
-  # Token mode with the approval line open (fake value).
+  Save-SettingsSnapshot (Join-Path $Snapshot "settings-add-$tn.png") 1
   $script:nf = @{ label = 'Side project'; src = 'token'; input = ''; plan = '' }
-  Save-SettingsSnapshot (Join-Path $Snapshot 'settings-add-token.png') 1 {
+  Save-SettingsSnapshot (Join-Path $Snapshot "settings-add-token-$tn.png") 1 {
     $script:nfEls.token.Password = 'sk-ant-oat01-FAKEFAKEFAKE'
     $script:nfEls.label.Text = 'Side project'
     Invoke-AddAccount
   }
-  # Five accounts on the taskbar at 100/125/150% display scale, with and without percentages, plus one
-  # account's hover tooltip (layout checks; not part of the README). 'Sandbox' and 'Side project' share an S.
-  $now = [DateTime]::UtcNow
-  $mkWin = { param($p, $mins) [pscustomobject]@{ pct = $p; reset = $now.AddMinutes($mins).ToString('o') } }
-  $script:accounts = @($script:accounts) + @(
-    [pscustomobject]@{ name = 'cs'; status = 'ok'; method = 'probe'; five_h = (& $mkWin 91 95); seven_d = (& $mkWin 58 3000); fable = (& $mkWin 20 3000) }
-    [pscustomobject]@{ name = 'node'; status = 'ok'; method = 'probe'; five_h = (& $mkWin 3 250); seven_d = (& $mkWin 77 5000); fable = (& $mkWin 5 5000) }
-  )
-  (Get-AcctCfg 'cs').label = 'Sandbox'
-  foreach ($c in Get-AcctCfgs) { Set-AcctProp $c.name 'taskbar' $true; Set-AcctProp $c.name 'style' 'combined' }
-  $script:config | Add-Member -Force names 'hidden'
-  $script:config | Add-Member -Force inside 'initials'; $script:config | Add-Member -Force next 'none'
-  Save-Snapshot (Join-Path $Snapshot 'widget-nopct.png')
-  foreach ($scale in 1, 1.25, 1.5) {
-    foreach ($pcts in $true, $false) {
-      $script:config | Add-Member -Force inside $(if ($pcts) { 'percent' } else { 'initials' }); $script:config | Add-Member -Force next $(if ($pcts) { 'caption' } else { 'none' })
-      $tip = if (-not $pcts -and $scale -eq 1.25) { Get-AccountTip (Get-AcctCfg 'work') (Get-Result 'work') }
-      Save-BarSnapshot (Join-Path $Snapshot "bar-$(if ($pcts) { 'pct' } else { 'nopct' })-$([int]($scale * 100)).png") $scale $tip
-    }
-  }
-  foreach ($c in Get-AcctCfgs) { Set-AcctProp $c.name 'style' 'rings' }
-  Save-BarSnapshot (Join-Path $Snapshot 'bar-rings-nopct-125.png') 1.25 $null
-  # Known values: 91 / 50 / 25 and 100 / 0 (compare with the arcs; -RingCheck measures them).
-  foreach ($c in Get-AcctCfgs) { Set-AcctProp $c.name 'taskbar' ($c.name -in 'personal', 'work') }
-  Set-AcctProp 'personal' 'limits' @('5h', '7d', 'fable')
-  Set-AcctProp 'work' 'limits' @('5h', '7d')
-  $known = @{ personal = @(91, 50, 25); work = @(100, 0, $null) }
-  foreach ($n in $known.Keys) {
-    $r = Get-Result $n
-    $r.five_h = & $mkWin $known[$n][0] 95; $r.seven_d = & $mkWin $known[$n][1] 3000
-    $r.fable = if ($null -ne $known[$n][2]) { & $mkWin $known[$n][2] 3000 } else { & $mkWin $null 3000 }
-  }
-  $script:config | Add-Member -Force names 'left'
-  $script:config | Add-Member -Force inside 'percent'; $script:config | Add-Member -Force next 'caption'
-  foreach ($scale in 1, 1.25, 1.5) { Save-BarSnapshot (Join-Path $Snapshot "bar-known-$([int]($scale * 100)).png") $scale $null }
-  # Every inside / next combination, and the three size presets (with names and dividers on, then off).
-  foreach ($in in 'none', 'initials', 'percent') {
-    foreach ($nx in 'none', 'caption', 'percent') {
-      $script:config | Add-Member -Force inside $in; $script:config | Add-Member -Force next $nx
-      Save-BarSnapshot (Join-Path $Snapshot "combo-in-$in-next-$nx.png") 1 $null
-    }
-  }
-  $script:config | Add-Member -Force inside 'percent'; $script:config | Add-Member -Force next 'percent'
-  foreach ($size in 'compact', 'normal', 'large') {
-    $script:config | Add-Member -Force size $size
-    foreach ($scale in 1, 1.5) {
-      Save-BarSnapshot (Join-Path $Snapshot "size-$size-$([int]($scale * 100)).png") $scale $null
-    }
-  }
-  $script:config | Add-Member -Force size 'large'; $script:config | Add-Member -Force showDividers $true
-  Save-BarSnapshot (Join-Path $Snapshot 'size-large-dividers-100.png') 1 $null
-  foreach ($c in Get-AcctCfgs) { Set-AcctProp $c.name 'style' 'combined' }
-  Save-BarSnapshot (Join-Path $Snapshot 'size-large-combined-100.png') 1 $null
-  $script:config | Add-Member -Force size 'normal'
-  Save-BarSnapshot (Join-Path $Snapshot 'size-normal-combined-100.png') 1 $null
-  $script:config | Add-Member -Force inside 'initials'; $script:config | Add-Member -Force next 'caption'
-  Save-BarSnapshot (Join-Path $Snapshot 'size-normal-combined-initials-100.png') 1 $null
-
-  # 1.9.2: combined dials with the reset time, the spacing / name / inner-ring / next-to-ring options, hover text.
-  $script:config | Add-Member -Force showDividers $false
-  $script:config | Add-Member -Force inside 'initials'; $script:config | Add-Member -Force next 'percent'
-  foreach ($size in 'normal', 'large') {
-    $script:config | Add-Member -Force size $size
-    Save-BarSnapshot (Join-Path $Snapshot "dials-reset-$size.png") 1 $null
-  }
-  $script:config | Add-Member -Force size 'compact'
-  Save-BarSnapshot (Join-Path $Snapshot 'dials-reset-compact-hover.png') 1 (Get-AccountTipFor 'personal')
-  foreach ($nx in 'resetin', 'resetat') {
-    $script:config | Add-Member -Force next $nx
-    $script:config | Add-Member -Force size 'normal'
-    Save-BarSnapshot (Join-Path $Snapshot "next-$nx-combined.png") 1 $null
-    foreach ($c in Get-AcctCfgs) { Set-AcctProp $c.name 'style' 'rings' }
-    Save-BarSnapshot (Join-Path $Snapshot "next-$nx-rings.png") 1 $null
-    foreach ($c in Get-AcctCfgs) { Set-AcctProp $c.name 'style' 'combined' }
-  }
-  $script:config | Add-Member -Force next 'caption'
-  foreach ($sp in 'tight', 'normal', 'wide') {
-    $script:config | Add-Member -Force spacing $sp; $script:config | Add-Member -Force size 'compact'
-    Save-BarSnapshot (Join-Path $Snapshot "spacing-$sp-compact.png") 1 $null
-  }
-  $script:config | Add-Member -Force spacing 'normal'; $script:config | Add-Member -Force size 'normal'
-  foreach ($nm in 'left', 'right', 'hidden') {
-    $script:config | Add-Member -Force names $nm
-    Save-BarSnapshot (Join-Path $Snapshot "names-$nm.png") 1 $null
-  }
-  $script:config | Add-Member -Force names 'left'
-  $script:config | Add-Member -Force innerWindow '7d'
-  foreach ($c in Get-AcctCfgs) { Set-AcctProp $c.name 'pie' '' }
-  Save-BarSnapshot (Join-Path $Snapshot 'inner-7d.png') 1 $null
-  $script:config | Add-Member -Force innerWindow '5h'
-  # Ring hover text, as the system tooltip would show it.
-  $pk = Get-AcctCfg 'personal'
-  Save-BarSnapshot (Join-Path $Snapshot 'ring-hover.png') 1 ((Get-RingTip $pk '5h' (Get-Win (Get-Result 'personal') '5h') 'inner ring') + "`n`n" + (Get-RingTip $pk '7d' (Get-Win (Get-Result 'personal') '7d') 'outer ring'))
-
-  # Settings: Display and Accounts (chip strip) once more with the new controls, then every Updates tab state.
-  $script:tab = 'disp'; Save-SettingsSnapshot (Join-Path $Snapshot 'settings-display-new.png') 1
-  $script:acctMode = $null; $script:tab = 'acct'; $script:expanded = 'work'; Save-SettingsSnapshot (Join-Path $Snapshot 'settings-accounts-new.png') 1
-  $script:tab = 'upd'
+  $script:acctMode = $null
+  # General: every update state.
+  $script:tab = 'gen'
   $script:update = $null
-  Save-SettingsSnapshot (Join-Path $Snapshot 'update-1-idle.png') 1 { $script:updMsg = $null; Set-UpdStatus $null $null }
-  Save-SettingsSnapshot (Join-Path $Snapshot 'update-2-checking.png') 1 { Set-UpdStatus "Checking$ELL" $null }
-  Save-SettingsSnapshot (Join-Path $Snapshot 'update-3-uptodate.png') 1 { Set-UpdStatus "Up to date (v$AppVersion)" $null }
+  Save-SettingsSnapshot (Join-Path $Snapshot "update-1-idle-$tn.png") 1 { $script:updMsg = $null; Set-UpdStatus $null $null }
+  Save-SettingsSnapshot (Join-Path $Snapshot "update-2-checking-$tn.png") 1 { Set-UpdStatus "Checking$ELL" $null }
   Set-DemoUpdate
-  Save-SettingsSnapshot (Join-Path $Snapshot 'update-4-available.png') 1 { Set-UpdStatus 'v1.9.3 is available' $null }
+  Save-SettingsSnapshot (Join-Path $Snapshot "update-3-available-$tn.png") 1 { Set-UpdStatus 'v2.1.0 is available' $null }
   $script:updatingSince = Get-Date
-  Save-SettingsSnapshot (Join-Path $Snapshot 'update-5-downloading.png') 1 { Set-UpdStatus "Downloading v1.9.3$ELL 62%" 62 }
-  Save-SettingsSnapshot (Join-Path $Snapshot 'update-6-installing.png') 1 { Set-UpdStatus "Installing v1.9.3. The widget closes and restarts in a few seconds$ELL" 100 }
+  Save-SettingsSnapshot (Join-Path $Snapshot "update-4-downloading-$tn.png") 1 { Set-UpdStatus "Downloading v2.1.0$ELL 62%" 62 }
   $script:updatingSince = $null
-  Save-SettingsSnapshot (Join-Path $Snapshot 'update-7-error.png') 1 { Set-UpdStatus 'Download failed: the remote name could not be resolved' $null }
+  Save-SettingsSnapshot (Join-Path $Snapshot "update-5-error-$tn.png") 1 { Set-UpdStatus 'Download failed: the remote name could not be resolved' $null }
   $script:update = $null
-  Save-SettingsSnapshot (Join-Path $Snapshot 'update-8-updated.png') 1 { Set-UpdStatus "Updated to v$AppVersion" $null }
-
-  # 1.9.3: an account with no 5h window (Ultra) next to two with one: no 5h ring, row, caption or tooltip line.
-  $script:update = $null
+  # The list in its other settings: inline limited accounts, and an account with a problem.
   Set-DemoData
-  foreach ($c in Get-AcctCfgs) { Set-AcctProp $c.name 'taskbar' ($c.name -in 'personal', 'work', 'ultra') }
-  Set-AcctProp 'ultra' 'limits' @('5h', '7d', 'fable')
-  $script:config | Add-Member -Force names 'left'
-  $script:config | Add-Member -Force inside 'percent'; $script:config | Add-Member -Force next 'caption'
-  Set-AcctProp 'ultra' 'style' 'combined'
-  Save-BarSnapshot (Join-Path $Snapshot 'ultra-bar-combined.png') 1 (Get-AccountTipFor 'ultra')
-  Set-AcctProp 'ultra' 'style' 'rings'
-  Save-BarSnapshot (Join-Path $Snapshot 'ultra-bar-rings.png') 1 (Get-AccountTipFor 'ultra')
-  Save-Snapshot (Join-Path $Snapshot 'ultra-popup.png')
+  $script:config | Add-Member -Force listLimited 'inline'
+  (Get-Result 'work').status = 'expired'
+  Save-Snapshot (Join-Path $Snapshot "popup-inline-$tn.png")
   exit
 }
-
 # ---------------------------------------------------------------- timers & run
 
 $pollTimer = New-Object Windows.Threading.DispatcherTimer
@@ -2789,6 +3307,22 @@ $dlTimer.Add_Tick({ if ($script:dlJob) { Step-Download } else { $dlTimer.Stop() 
 $updTimer = New-Object Windows.Threading.DispatcherTimer
 $updTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 $updTimer.Add_Tick({ if ($script:updJob) { Complete-UpdateCheck } else { $updTimer.Stop() } })
+
+# The theme follows Windows. Colours are baked into the windows when they are built, so a change (light <-> dark) restarts
+# the widget: a helper starts a fresh copy two seconds after this one has exited.
+function Restart-Widget {
+  Flush-UiConfig
+  Write-Log 'theme changed: restarting'
+  $conhost = Join-Path $env:WINDIR 'System32\conhost.exe'
+  $script2 = Join-Path $PSScriptRoot 'ClaudeUsageWidget.ps1'
+  $cmd = "Start-Sleep 2; Start-Process '$conhost' -ArgumentList '--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File ""$script2""'"
+  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
+  Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $enc"
+  Exit-Widget
+}
+$themeTimer = New-Object Windows.Threading.DispatcherTimer
+$themeTimer.Interval = [TimeSpan]::FromSeconds(3)
+$themeTimer.Add_Tick({ if (-not $env:CUW_THEME -and (Get-SystemLight) -ne $isLight) { $themeTimer.Stop(); Restart-Widget } })
 
 $script:hwnd = [IntPtr]::Zero
 $topTimer = New-Object Windows.Threading.DispatcherTimer
@@ -2824,6 +3358,7 @@ $widget.Add_Loaded({
   Update-Widget
   $topTimer.Start()
   $minuteTimer.Start()
+  if (-not $Demo) { $themeTimer.Start() }
   Start-Refresh
   Complete-PendingUpdate
   if (Test-UpdateDue) { Start-UpdateCheck }
@@ -2840,6 +3375,7 @@ try {
   Write-Log "fatal: $_"
   throw
 } finally {
+  Flush-UiConfig
   if ($script:tray) { $script:tray.Visible = $false; $script:tray.Dispose() }
   $mutex.ReleaseMutex()
 }

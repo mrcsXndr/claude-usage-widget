@@ -3,6 +3,25 @@
 All notable changes to Claude Usage Widget. Versions follow [semantic versioning](https://semver.org/).
 Each version is a [GitHub release](https://github.com/mrcsXndr/claude-usage-widget/releases) with an installer.
 
+## [2.0.0] - 2026-11-05
+
+The Windows UI is rewritten. Old configs migrate on first start (a copy is kept as `config.v1.json`); nothing to do by hand.
+
+### Changed
+- **Compact reset times** everywhere: `in 37m`, `in 2h 14m` (under 5 h), `11pm` (later today), `Su 11pm` / `Tu 3pm` (another day; day codes M Tu W Th F Sa Su). 12-hour by default, 24-hour in Settings. The tooltip spells it out (`Resets Tuesday 3:00 pm (in 4d 23h)`).
+- **Taskbar**: three Looks (Minimal, Balanced, Detailed, or Custom). Balanced shows `14%` over `W 12pm` beside each ring. Dual rings carry the account initial. Accounts at their limit collapse into one red ring with a count and the first back time (or stay as red rings, or hide).
+- **5-hour window is optional** (Settings > Taskbar): off drops it from rings, text and the list.
+- **Account list**: header with a summary (`4 available, 3 at limit`), one block per account with a plan chip, tidy rows (caption, bar, percent, reset glyph + time, repeated resets left out), an `At limit` group with back times, a one-line update bar, problem states as a single line. The legend line is gone.
+- **Settings** is a Win 11 style window with a left nav (Taskbar, Usage list, Accounts, General). Changes apply at once (no OK / Cancel / Apply). The Taskbar page has a live preview, Look tiles and folded More options. Accounts are rows you drag to reorder, each with an expander (name, initials, plan, rings, windows shown, remove).
+- The theme follows Windows and the widget restarts itself when it changes.
+
+### Added
+- Config keys `look`, `show5h`, `atLimit`, `timeFormat`, `listLimited`, `listFable`, `listPlan`, `configVersion`; `showPercents`, `showCaptions`, `showNames`, `showLegend`, `hideAtLimit` are folded in and dropped.
+- Checks: `-FormatCheck`, `-MigrateCheck` (alongside `-RingCheck`). `-Snapshot` renders both themes (`CUW_THEME=light`).
+
+### Not in this release
+- The macOS menu bar app is unchanged (v1.x look). Its 2.0 parity work (menu bar looks, new popover, Settings scene) needs a Mac to build and test, so it is listed under Open items in CLAUDE.md rather than shipped untested.
+
 ## [1.9.4] - 2026-11-04
 
 ### Changed
