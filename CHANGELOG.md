@@ -3,6 +3,19 @@
 All notable changes to Claude Usage Widget. Versions follow [semantic versioning](https://semver.org/).
 Each version is a [GitHub release](https://github.com/mrcsXndr/claude-usage-widget/releases) with an installer.
 
+## [2.1.0] - Unreleased
+
+### Added
+- Windows: Codex ChatGPT accounts in the existing widget, alongside Claude accounts.
+- Codex profile discovery and app-server usage reads without inference requests.
+- Additional Codex quota buckets in the account list and tooltips, including model-specific limits when reported.
+
+### Fixed
+- Preserve settings edits when an account refresh or discovery is running.
+- Center ring initials and numbers using their visible glyph bounds, including combined rings and settings previews.
+- Back up existing settings before installation and stop only the widget in the installation folder.
+- Shorten compact taskbar reset times with explicitly approximate whole-hour labels; retain exact times on hover.
+
 ## [2.0.0] - 2026-11-05
 
 The Windows UI is rewritten. Old configs migrate on first start (a copy is kept as `config.v1.json`); nothing to do by hand.

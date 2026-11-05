@@ -9,15 +9,15 @@
 #   powershell -NoProfile -File tools\Test-Update.ps1
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
-$T = Join-Path $env:TEMP ('cuw-test-update-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$T = Join-Path $PSScriptRoot ('.cuw-test-update-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $Local = Join-Path $T 'Local'; $Roam = Join-Path $T 'Roaming'; $Shortcuts = Join-Path $T 'Shortcuts'
 $Dest = Join-Path $Local 'Programs\ClaudeUsageWidget'
 $Main = Join-Path $Dest 'ClaudeUsageWidget.ps1'
 New-Item -ItemType Directory -Force $Local, (Join-Path $Roam 'claude-usage-widget'), $Shortcuts | Out-Null
 # An existing config with no accounts: the test widget finds nothing to read and makes no network calls.
 [IO.File]::WriteAllText((Join-Path $Roam 'claude-usage-widget\config.json'), '{"refreshMinutes":30,"accounts":[]}')
-$saved = @{}; foreach ($k in 'APPDATA', 'LOCALAPPDATA', 'CUW_TEST_ROOT') { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
-$env:APPDATA = $Roam; $env:LOCALAPPDATA = $Local; $env:CUW_TEST_ROOT = $Shortcuts
+$saved = @{}; foreach ($k in 'APPDATA', 'LOCALAPPDATA', 'CUW_TEST_ROOT', 'TEMP', 'TMP') { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+$env:APPDATA = $Roam; $env:LOCALAPPDATA = $Local; $env:CUW_TEST_ROOT = $Shortcuts; $env:TEMP = $T; $env:TMP = $T
 $fail = 0
 function Check([string]$name, [bool]$ok, [string]$detail = '') {
   if (-not $ok) { $script:fail++ }
@@ -27,7 +27,7 @@ function Get-Widgets { @(Get-CimInstance Win32_Process -Filter "Name='powershell
 function Wait-Until([scriptblock]$cond, [int]$sec) { for ($i = 0; $i -lt $sec * 2; $i++) { if (& $cond) { return $true }; Start-Sleep -Milliseconds 500 }; return $false }
 
 # The files an install holds, copied from this checkout; the version is set back to 1.0.0 so the update is "newer".
-$files = 'ClaudeUsageWidget.ps1', 'uninstall.ps1', 'LICENSE', 'install.ps1', 'lib\Usage.ps1', 'lib\Updater.ps1', 'assets\icon.ico'
+$files = 'ClaudeUsageWidget.ps1', 'uninstall.ps1', 'LICENSE', 'install.ps1', 'lib\Usage.ps1', 'lib\Codex.ps1', 'lib\Updater.ps1', 'assets\icon.ico'
 function New-OldInstall {
   Remove-Item $Dest -Recurse -Force -ErrorAction SilentlyContinue
   foreach ($f in $files) {

@@ -9,7 +9,7 @@ $log = Join-Path $LogDir 'update.log'
 function L([string]$m) {
   try { New-Item -ItemType Directory -Force $LogDir | Out-Null; Add-Content $log ('{0:yyyy-MM-dd HH:mm:ss}  updater: {1}' -f (Get-Date), $m) } catch {}
 }
-$Files = 'ClaudeUsageWidget.ps1', 'uninstall.ps1', 'LICENSE', 'lib\Usage.ps1', 'lib\Updater.ps1', 'assets\icon.ico'
+$Files = 'ClaudeUsageWidget.ps1', 'uninstall.ps1', 'LICENSE', 'lib\Usage.ps1', 'lib\Codex.ps1', 'lib\Updater.ps1', 'assets\icon.ico'
 $Main = Join-Path $Dest 'ClaudeUsageWidget.ps1'
 
 function Get-Widgets {
@@ -56,6 +56,9 @@ try {
   try {
     # 3. Replace the files.
     Expand-Archive $Zip $stage
+    foreach ($f in $Files) {
+      if ($f -ne 'lib\Updater.ps1' -and -not (Test-Path -LiteralPath (Join-Path $stage $f) -PathType Leaf)) { throw "the zip has no $f" }
+    }
     foreach ($f in $Files) {
       $s = Join-Path $stage $f
       if (-not (Test-Path $s)) { if ($f -eq 'lib\Updater.ps1') { continue } else { throw "the zip has no $f" } }

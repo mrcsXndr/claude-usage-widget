@@ -13,13 +13,21 @@ $ProgressPreference = 'SilentlyContinue'
 $Repo    = 'mrcsXndr/claude-usage-widget'
 $Name    = 'Claude Usage Widget'
 $Dest    = Join-Path $env:LOCALAPPDATA 'Programs\ClaudeUsageWidget'
-$Files   = 'ClaudeUsageWidget.ps1', 'lib\Usage.ps1', 'lib\Updater.ps1', 'uninstall.ps1', 'assets\icon.ico', 'LICENSE'
+$Files   = 'ClaudeUsageWidget.ps1', 'lib\Usage.ps1', 'lib\Codex.ps1', 'lib\Updater.ps1', 'uninstall.ps1', 'assets\icon.ico', 'LICENSE'
 # CUW_TEST_ROOT redirects the shortcuts and the Apps entry to a scratch folder (used by tools\Test-Update.ps1 only).
 $RegKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ClaudeUsageWidget' + $(if ($env:CUW_TEST_ROOT) { 'Test' })
 $LogFile = Join-Path $env:APPDATA 'claude-usage-widget\update.log'
 
 function Say($msg, $color = 'Gray') { Write-Host "  $msg" -ForegroundColor $color }
 function Log($msg) { try { New-Item -ItemType Directory -Force (Split-Path $LogFile) | Out-Null; Add-Content $LogFile ('{0:yyyy-MM-dd HH:mm:ss}  installer: {1}' -f (Get-Date), $msg) } catch {} }
+
+function Backup-InstallConfig([string]$directory) {
+  $configFile = Join-Path $directory 'config.json'
+  if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) { return }
+  $backupFile = Join-Path $directory ('config.pre-install-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.json')
+  Copy-Item -LiteralPath $configFile -Destination $backupFile -ErrorAction Stop
+  return $backupFile
+}
 
 Write-Host ''
 Write-Host "  $Name" -ForegroundColor White
@@ -41,10 +49,16 @@ if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'ClaudeUsageWidget.ps
 }
 
 Log "start (from $src)"
+foreach ($f in $Files) {
+  if ($f -ne 'lib\Updater.ps1' -and -not (Test-Path -LiteralPath (Join-Path $src $f) -PathType Leaf)) { throw "the release has no $f" }
+}
+$configBackup = Backup-InstallConfig (Join-Path $env:APPDATA 'claude-usage-widget')
+if ($configBackup) { Say "Settings backed up to $configBackup"; Log "settings backup: $configBackup" }
 # Stop a running copy so its files can be replaced, and wait until it is really gone (a new widget that starts while
 # the old one still holds its single-instance lock quits at once, which looked like the widget vanishing).
+$installedMain = Join-Path $Dest 'ClaudeUsageWidget.ps1'
 $old = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-  Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*ClaudeUsageWidget.ps1*' })
+  Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like "*$installedMain*" })
 foreach ($o in $old) { Stop-Process -Id $o.ProcessId -Force -ErrorAction SilentlyContinue }
 foreach ($o in $old) { try { (Get-Process -Id $o.ProcessId -ErrorAction Stop).WaitForExit(10000) | Out-Null } catch {} }
 
@@ -88,7 +102,7 @@ if (-not $NoLaunch) {
   $main = Join-Path $Dest 'ClaudeUsageWidget.ps1'
   $up = $false
   for ($try = 1; $try -le 2 -and -not $up; $try++) {
-    Start-Process (Join-Path $env:WINDIR 'System32\conhost.exe') -WorkingDirectory $Dest -ArgumentList "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$main`""
+    Start-Process (Join-Path $env:WINDIR 'System32\conhost.exe') -WindowStyle Hidden -WorkingDirectory $Dest -ArgumentList "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$main`""
     for ($i = 0; $i -lt 20 -and -not $up; $i++) {
       Start-Sleep -Milliseconds 500
       $up = [bool](Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like "*$main*" })

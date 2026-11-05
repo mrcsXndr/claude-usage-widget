@@ -245,11 +245,13 @@ function Import-UiConfig {
 
 # Settings apply at once: an edit schedules one write 400 ms after the last edit (Flush-UiConfig writes now).
 $script:savePending = $false
+$script:configRevision = 0
 $saveTimer = New-Object Windows.Threading.DispatcherTimer
 $saveTimer.Interval = [TimeSpan]::FromMilliseconds(400)
 $saveTimer.Add_Tick({ Flush-UiConfig })
 function Save-UiConfig {
   if ($Demo) { return }
+  $script:configRevision++
   $script:savePending = $true
   $saveTimer.Stop(); $saveTimer.Start()
 }
@@ -304,16 +306,32 @@ function Get-Shorts {
   return $out
 }
 # The API's plan wins; the plan picked in settings (at first, the one found at discovery) covers tokens it can't read.
-function Get-Plan($cfg, $res) { if ($res.apiPlan) { "$($res.apiPlan)" } elseif ("$($cfg.plan)".Trim()) { "$($cfg.plan)".Trim() } else { $null } }
+function Get-Plan($cfg, $res) { if ($res.apiPlan) { "$($res.apiPlan)" } elseif (-not (Test-CodexAccount $cfg $res) -and "$($cfg.plan)".Trim()) { "$($cfg.plan)".Trim() } else { $null } }
 
-function Get-Caption($key) {
+function Test-CodexAccount($cfg, $res) { $cfg.source -eq 'codex' -or $res.provider -eq 'codex' }
+
+function Get-ProviderName($cfg, $res) { if (Test-CodexAccount $cfg $res) { 'Codex' } else { 'Claude' } }
+
+function Get-Caption($key, $cfg = $null, $res = $null) {
+  if (Test-CodexAccount $cfg $res) {
+    if (-not $res -and $cfg.name) { $res = Get-Result $cfg.name }
+    $minutes = (Get-RawWin $res $key).minutes
+    if ($minutes -gt 0) {
+      if ($minutes % 1440 -eq 0) { return "$($minutes / 1440)d" }
+      if ($minutes % 60 -eq 0) { return "$($minutes / 60)h" }
+      return "${minutes}m"
+    }
+    if ($key -eq '5h') { return 'Primary' }
+    if ($key -eq '7d') { return 'Secondary' }
+    return ''
+  }
   $c = "$($script:config.captions.$key)".Trim()
   if ($c) { return $c }
   return $DefaultCaptions[$key]
 }
 
 function Get-TaskbarLimits($cfg) {
-  $l = @($LimitKeys | Where-Object { @($cfg.limits) -contains $_ })
+  $l = @($LimitKeys | Where-Object { @($cfg.limits) -contains $_ -and -not ($_ -eq 'fable' -and (Test-CodexAccount $cfg)) })
   if ($l.Count) { return $l }
   return @('5h', '7d')
 }
@@ -341,7 +359,19 @@ function Test-HasFiveH($res) {
 function Get-ShownLimits($cfg, $res) {
   $l = @(Get-TaskbarLimits $cfg)
   if (Test-NoFiveH $res) { $l = @($l | Where-Object { $_ -ne '5h' }); if (-not $l.Count) { $l = @('7d') } }
+  if ((Test-CodexAccount $cfg $res) -and $res.status -in 'ok', 'limited') {
+    $l = @($l | Where-Object { $null -ne (Get-RawWin $res $_).pct })
+    if (-not $l.Count) {
+      $l = @('5h', '7d' | Where-Object { ($_ -ne '5h' -or $script:config.show5h -ne $false) -and $null -ne (Get-RawWin $res $_).pct })
+    }
+  }
   return $l
+}
+
+function Test-CombinedWindows($cfg, $res) {
+  if ($cfg.style -ne 'combined' -or (Test-NoFiveH $res)) { return $false }
+  if (Test-CodexAccount $cfg $res) { return $null -ne $res.five_h.pct -and $null -ne $res.seven_d.pct }
+  return $true
 }
 
 function Get-LastUsed {
@@ -471,6 +501,28 @@ function Get-TimeFormat { if ("$($script:config.timeFormat)" -eq '24h') { '24h' 
 function Get-Reset($iso) { Format-ResetShort $iso (Get-TimeFormat) }
 function Get-ResetLong($iso) { Format-ResetLong $iso (Get-TimeFormat) }
 
+# Taskbar-only rounding; lists and tooltips keep the exact shared formatters.
+function Get-TaskbarReset($iso, [switch]$Absolute) {
+  if ((Get-SizeKey) -ne 'compact') {
+    if ($Absolute) { return Format-ResetAt $iso }
+    return Get-Reset $iso
+  }
+  if ($null -eq $iso -or $iso -eq '') { return '' }
+  $dt = if ($iso -is [DateTime]) { $iso } else { [DateTime]::Parse($iso, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) }
+  if ($dt.Kind -eq 'Utc') { $dt = $dt.ToLocalTime() }
+  $now = Get-Date
+  if ($null -eq $dt -or $dt -le $now) { return '' }
+  if (-not $Absolute -and ($dt - $now).TotalHours -lt 5) {
+    return Format-ResetShort $iso (Get-TimeFormat) $now
+  }
+  $hour = $dt.Date.AddHours($dt.Hour)
+  $approx = ''
+  if ($dt -gt $hour) { $hour = $hour.AddHours(1); $approx = '~' }
+  $clock = $approx + (Format-ClockShort $hour (Get-TimeFormat))
+  if ($hour.Date -eq $now.Date) { return $clock }
+  return "$($DayCodes[[int]$hour.DayOfWeek]) $clock"
+}
+
 function Get-RawWin($res, $key) {
   if (-not $res) { return $null }
   switch ($key) { '5h' { $res.five_h } '7d' { $res.seven_d } 'fable' { $res.fable } }
@@ -481,7 +533,7 @@ function Get-RawWin($res, $key) {
 function Get-Win($res, $key) {
   $w = Get-RawWin $res $key
   if ($w -and $null -ne $w.pct -and $w.reset -and (ConvertTo-LocalTime $w.reset) -le (Get-Date)) {
-    return [pscustomobject]@{ pct = 0; reset = $null }
+    return [pscustomobject]@{ pct = $(if ($res.provider -eq 'codex') { $null } else { 0 }); reset = $null; minutes = $w.minutes }
   }
   return $w
 }
@@ -541,6 +593,7 @@ function Set-DemoData {
 # Reads run in a background runspace so token commands and HTTP never block the UI.
 function Start-Refresh([switch]$Discover) {
   if ($script:job -or (Get-Cooldown) -gt 0) { return }
+  Flush-UiConfig
   $script:lastTry = Get-Date
   $script:notice = $null
   if ($Demo) { Set-DemoData; Update-All; return }
@@ -551,10 +604,15 @@ function Start-Refresh([switch]$Discover) {
     . $lib
     $cfg = Read-Config
     $added = 0
-    if ($discover) { $added = Add-DiscoveredAccounts $cfg; if ($added) { Save-Config $cfg } }
-    [pscustomobject]@{ added = $added; rows = @(Get-AllUsage $cfg $cache) }
+    $newAccounts = @()
+    if ($discover) {
+      $existingNames = @($cfg.accounts | ForEach-Object name)
+      $added = Add-DiscoveredAccounts $cfg
+      $newAccounts = @($cfg.accounts | Where-Object { $existingNames -notcontains $_.name })
+    }
+    [pscustomobject]@{ added = $added; newAccounts = $newAccounts; rows = @(Get-AllUsage $cfg $cache) }
   }).AddArgument($LibPath).AddArgument($script:methodCache).AddArgument([bool]$Discover)
-  $script:job = @{ ps = $ps; handle = $ps.BeginInvoke(); started = Get-Date; discover = [bool]$Discover }
+  $script:job = @{ ps = $ps; handle = $ps.BeginInvoke(); started = Get-Date; discover = [bool]$Discover; configRevision = $script:configRevision }
   $pollTimer.Start()
   Update-All
 }
@@ -569,6 +627,14 @@ function Complete-Refresh {
     if ($timedOut) { $j.ps.Stop(); throw 'refresh timed out after 180s' }
     $out = @($j.ps.EndInvoke($j.handle))[0]
     $script:accounts = @($out.rows)
+    if ($j.discover) {
+      foreach ($account in @($out.newAccounts)) {
+        if (-not @(Get-AcctCfgs | Where-Object { Test-SameAccount $_ $account }).Count) {
+          $script:config.accounts = @(Get-AcctCfgs) + @($account)
+          Save-UiConfig
+        }
+      }
+    }
     $script:updated = Get-Date
     $script:lastError = $null
     if ($j.discover) {
@@ -582,12 +648,7 @@ function Complete-Refresh {
   } finally {
     $j.ps.Dispose()
   }
-  # An edit still waiting for its write is newer than the file: keep it, and pick up accounts a scan just added.
-  if ($script:savePending) {
-    if ($j.discover -and -not $Demo) {
-      try { foreach ($a in @((Read-Config).accounts | Where-Object { $_ })) { if (-not (Get-AcctCfg $a.name)) { $script:config.accounts = @(Get-AcctCfgs) + @($a) } } } catch {}
-    }
-  } else { Import-UiConfig }
+  if (-not $j.discover -and -not $script:savePending -and $j.configRevision -eq $script:configRevision) { Import-UiConfig }
   $script:forcePopup = $true
   Update-All
 }
@@ -895,12 +956,23 @@ function Get-RingSize([double]$dip = $RingDip) {
   return 2 * [Math]::Round($dip * $dpi / 2, [MidpointRounding]::AwayFromZero) / $dpi
 }
 
-# Segoe UI puts its baseline at ~81% of the line box, so digits sit ~0.06 em below the box centre;
-# the 1.3 / 1.2 bottom margins lift the text that much (about 0.6 px) so it is optically centred on the ring.
+function Get-CenteredRingTextXaml([string]$text, [double]$fontSize) {
+  if (-not $text) { return '' }
+  $font = New-Object Windows.Media.FontFamily('Segoe UI Variable Text, Segoe UI')
+  $typeface = New-Object Windows.Media.Typeface($font, [Windows.FontStyles]::Normal, [Windows.FontWeights]::SemiBold, [Windows.FontStretches]::Normal)
+  $formatted = New-Object Windows.Media.FormattedText($text, [Globalization.CultureInfo]::CurrentUICulture, [Windows.FlowDirection]::LeftToRight, $typeface, $fontSize, [Windows.Media.Brushes]::White)
+  $bounds = $formatted.BuildGeometry((New-Object Windows.Point(0, 0))).Bounds
+  if ($bounds.IsEmpty) { return '' }
+  $offsetX = (($formatted.WidthIncludingTrailingWhitespace - $bounds.Width) / 2 - $bounds.X).ToString('0.####', [Globalization.CultureInfo]::InvariantCulture)
+  $offsetY = (($formatted.Height - $bounds.Height) / 2 - $bounds.Y).ToString('0.####', [Globalization.CultureInfo]::InvariantCulture)
+  $sizeText = $fontSize.ToString('0.####', [Globalization.CultureInfo]::InvariantCulture)
+  return "<TextBlock Text=`"$(Esc $text)`" FontFamily=`"Segoe UI Variable Text, Segoe UI`" FontSize=`"$sizeText`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`" HorizontalAlignment=`"Center`" VerticalAlignment=`"Center`" UseLayoutRounding=`"False`"><TextBlock.RenderTransform><TranslateTransform X=`"$offsetX`" Y=`"$offsetY`"/></TextBlock.RenderTransform></TextBlock>"
+}
+
 # Inside the ring: nothing, the account's initials or the percentage (Get-InsideMode).
 function Get-InsideText($pct, [string]$short) {
   switch (Get-InsideMode) {
-    'initials' { return (Esc $short) }
+    'initials' { return $short }
     'percent' { return $(if ($null -ne $pct) { Format-Pct $pct } elseif ($script:job) { $ELL } else { $DASH }) }
     default { return '' }
   }
@@ -932,7 +1004,7 @@ function Get-NextText([string]$mode, $pct, [string]$caption, $reset) {
   switch ($mode) {
     'caption' { return $caption }
     'resetin' { $t = Format-ResetIn $reset; return $(if ($t) { $t } else { $DASH }) }
-    'resetat' { $t = Format-ResetAt $reset; return $(if ($t) { $t } else { $DASH }) }
+    'resetat' { $t = Get-TaskbarReset $reset -Absolute; return $(if ($t) { $t } else { $DASH }) }
     default { return $(if ($null -ne $pct) { "$(Format-Pct $pct)%" } elseif ($script:job) { $ELL } else { $DASH }) }
   }
 }
@@ -955,14 +1027,14 @@ function Get-RingTip($cfg, [string]$key, $w, [string]$place = '') {
   if (-not $cfg) { return '' }
   $pct = if ($w -and $null -ne $w.pct) { "$(Format-Pct $w.pct)%" } else { $DASH }
   $rs = if ($w) { Get-ResetLong $w.reset } else { '' }
-  return "$(Get-Label $cfg)`n$(Get-Caption $key)  $pct$(if ($place) { "  ($place)" })$(if ($rs) { "`n$rs" })"
+  return "$(if (Test-CodexAccount $cfg) { "Codex $DOT " })$(Get-Label $cfg)`n$(Get-Caption $key $cfg)  $pct$(if ($place) { "  ($place)" })$(if ($rs) { "`n$rs" })"
 }
 
 # The tightest window an account shows: highest % of its shown windows, Fable left out unless nothing else is shown.
 # 'many' says the account draws more than one window, so the text beside it names the one it reports.
 function Get-Tightest($cfg, $res) {
   $keys = @(Get-ShownLimits $cfg $res)
-  if ($cfg.style -eq 'combined' -and -not (Test-NoFiveH $res)) { $keys = @('5h', '7d') }
+  if (Test-CombinedWindows $cfg $res) { $keys = @('5h', '7d') }
   $cand = @($keys | Where-Object { $_ -ne 'fable' })
   if (-not $cand.Count) { $cand = $keys }
   $best = $null; $bk = $cand[0]
@@ -980,7 +1052,7 @@ function Get-UsageTextXaml($cfg, $res, [string]$name = '') {
   $t = Get-Tightest $cfg $res
   $w = $t.win
   $pct = if ($w -and $null -ne $w.pct) { "$(Format-Pct $w.pct)%" } elseif ($script:job) { $ELL } else { $DASH }
-  $rs = if ($w) { Get-Reset $w.reset } else { '' }
+  $rs = if ($w) { Get-TaskbarReset $w.reset } else { '' }
   $soon = $false
   if ($w -and $w.reset) { $left = (ConvertTo-LocalTime $w.reset) - (Get-Date); $soon = $left.TotalMinutes -gt 0 -and $left.TotalMinutes -lt 60 }
   $f2 = $NextFont - 1
@@ -988,7 +1060,7 @@ function Get-UsageTextXaml($cfg, $res, [string]$name = '') {
     $l1 = "<TextBlock Text=`"$(Esc $name)`" FontSize=`"$NextFont`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`" TextTrimming=`"CharacterEllipsis`" MaxWidth=`"110`"/>"
     $l2 = "<TextBlock FontSize=`"$f2`" Foreground=`"$($Theme.sub)`"><Run Text=`"$(Esc $pct)`"/><Run Text=`"$(Esc $(if ($rs) { " $DOT " }))`"/><Run Text=`"$(Esc $rs)`" Foreground=`"$(if ($soon) { $Theme.fg } else { $Theme.sub })`"/></TextBlock>"
   } else {
-    $cap = if ($t.many) { "<Run Text=`"$(Esc (Get-Caption $t.key)) `" FontWeight=`"Normal`" FontSize=`"$f2`" Foreground=`"$($Theme.sub)`"/>" } else { '' }
+    $cap = if ($t.many) { "<Run Text=`"$(Esc (Get-Caption $t.key $cfg $res)) `" FontWeight=`"Normal`" FontSize=`"$f2`" Foreground=`"$($Theme.sub)`"/>" } else { '' }
     $l1 = "<TextBlock FontSize=`"$NextFont`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`">$cap<Run Text=`"$(Esc $pct)`"/></TextBlock>"
     $l2 = if ($rs) { "<TextBlock Text=`"$(Esc $rs)`" FontSize=`"$f2`" Foreground=`"$(if ($soon) { $Theme.fg } else { $Theme.sub })`"/>" } else { '' }
   }
@@ -1002,7 +1074,7 @@ function New-LimitGroupElement($limited) {
   $first = @($backs | Where-Object { $_ } | Sort-Object | Select-Object -First 1)
   $text = ''
   if ((Get-NextMode) -ne 'none') {
-    $b = if ($first.Count) { Get-Reset $first[0] } else { '' }
+    $b = if ($first.Count) { Get-TaskbarReset $first[0] } else { '' }
     $line2 = ''
     if ($b) { $line2 = "<TextBlock Text=`"$(Esc $b)`" FontSize=`"$($NextFont - 1)`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`"/>" }
     $text = "<StackPanel VerticalAlignment=`"Center`" Margin=`"7,0,0,1`"><TextBlock Text=`"At limit`" FontSize=`"$NextFont`" Foreground=`"$($Theme.sub)`"/>$line2</StackPanel>"
@@ -1012,7 +1084,7 @@ function New-LimitGroupElement($limited) {
   <Grid Width="$sz" Height="$sz">
     <Ellipse Stroke="$($Theme.ring)" StrokeThickness="$RingThick"/>
     <Path Name="Arc" StrokeThickness="$RingThick"/>
-    <TextBlock Text="$(@($limited).Count)" FontSize="$InFont" FontWeight="SemiBold" Foreground="$($Theme.fg)" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,1.3"/>
+    $(Get-CenteredRingTextXaml "$(@($limited).Count)" $InFont)
   </Grid>
   $text
 </StackPanel>
@@ -1037,7 +1109,7 @@ function New-RingElement($pct, [string]$caption, [bool]$gapAfter, [string]$short
   <Grid Width="$sz" Height="$sz">
     <Ellipse Stroke="$($Theme.ring)" StrokeThickness="$RingThick"/>
     <Path Name="Arc" StrokeThickness="$RingThick"/>
-    <TextBlock Text="$(Get-InsideText $pct $short)" FontSize="$(Get-InsideSize $short)" FontWeight="SemiBold" Foreground="$($Theme.fg)" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,1.3"/>
+    $(Get-CenteredRingTextXaml (Get-InsideText $pct $short) (Get-InsideSize $short))
   </Grid>
   $(Get-NextXaml $pct $caption $reset)
 </StackPanel>
@@ -1075,7 +1147,7 @@ function New-CombinedElement($cfg, $res, [string]$short) {
   if ($nx -ne 'usage' -and ($nx -ne 'none' -or $script:ShowReset)) {
     $lines = '<StackPanel VerticalAlignment="Center" Margin="7,0,0,0">' + (@(foreach ($k in '5h', '7d') {
       $w = Get-Win $res $k
-      $main = if ($nx -eq 'none') { '' } else { Get-NextText $nx $w.pct (Get-Caption $k) $w.reset }
+      $main = if ($nx -eq 'none') { '' } else { Get-NextText $nx $w.pct (Get-Caption $k $cfg $res) $w.reset }
       $color = Get-UsageColor $w.pct
       $mark = if ($k -eq $pieKey) { "<Ellipse Width=`"8`" Height=`"8`" Fill=`"$color`"/>" } else { "<Ellipse Width=`"8`" Height=`"8`" Stroke=`"$color`" StrokeThickness=`"1.8`"/>" }
       $r = if ($script:ShowReset -and $nx -notin 'resetin', 'resetat') { Get-Reset $w.reset } else { '' }
@@ -1101,7 +1173,7 @@ function New-CombinedElement($cfg, $res, [string]$short) {
     <Path Name="Arc" StrokeThickness="$RingThick"/>
     <Ellipse Width="$in" Height="$in" Stroke="$($Theme.ring)" StrokeThickness="$RingInnerThick" HorizontalAlignment="Center" VerticalAlignment="Center"/>
     <Path Name="Inner" Width="$in" Height="$in" StrokeThickness="$RingInnerThick" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-    <TextBlock Text="$(Esc $text)" FontSize="$([Math]::Max(7.5, $InFont - 3))" FontWeight="SemiBold" Foreground="$($Theme.fg)" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,1.2"/>
+    $(Get-CenteredRingTextXaml $text ([Math]::Max(7.5, $InFont - 3)))
   </Grid>
 "@
   }
@@ -1119,10 +1191,10 @@ function Get-AccountTip($cfg, $res) {
   if ($cfg) {
     $plan = Get-Plan $cfg $res
     $short = if ((Get-InsideMode) -eq 'initials') { (Get-Shorts)[$cfg.name] }
-    $tip += (Get-Label $cfg) + $(if ($short) { " ($short)" }) + $(if ($plan) { " $DOT $plan" })
+    $tip += $(if (Test-CodexAccount $cfg $res) { "Codex $DOT " }) + (Get-Label $cfg) + $(if ($short) { " ($short)" }) + $(if ($plan) { " $DOT $plan" })
     # Where each limit sits on the taskbar, so the bar itself needs no captions.
     $places = @{}
-    if ($cfg.style -eq 'combined' -and -not (Test-NoFiveH $res)) {
+    if (Test-CombinedWindows $cfg $res) {
       $pieKey = Get-PieKey $cfg
       $places[$pieKey] = if ((Get-InsideMode) -ne 'percent') { 'inner ring' } else { 'middle' }
       $places[$(if ($pieKey -eq '5h') { '7d' } else { '5h' })] = 'outer ring'
@@ -1131,8 +1203,20 @@ function Get-AccountTip($cfg, $res) {
       if ($keys.Count -gt 1) { for ($i = 0; $i -lt $keys.Count; $i++) { $places[$keys[$i]] = if ($i -eq 0) { 'left ring' } elseif ($i -eq $keys.Count - 1) { 'right ring' } else { 'middle ring' } } }
     }
     foreach ($k in $LimitKeys) {
+      if ($k -eq 'fable' -and (Test-CodexAccount $cfg $res)) { continue }
       $w = Get-Win $res $k
-      if ($w -and $null -ne $w.pct) { $tip += "$(Get-Caption $k)  $(Format-Pct $w.pct)%$(if ($places[$k]) { "  ($($places[$k]))" })$(if ($w.reset) { "  $DOT  $(Get-ResetLong $w.reset)" })" }
+      if ($w -and $null -ne $w.pct) { $tip += "$(Get-Caption $k $cfg $res)  $(Format-Pct $w.pct)%$(if ($places[$k]) { "  ($($places[$k]))" })$(if ($w.reset) { "  $DOT  $(Get-ResetLong $w.reset)" })" }
+    }
+    if (Test-CodexAccount $cfg $res) {
+      $tip += 'Taskbar rings show general Codex usage.'
+      foreach ($bucket in @($res.quotaBuckets | Where-Object { $_ -and $_.id -ne 'codex' })) {
+        $tip += "$($bucket.name)$(if ($bucket.status -eq 'limited') { ' - limit reached' })"
+        foreach ($key in '5h', '7d') {
+          $window = Get-RawWin $bucket $key
+          if ($null -ne $window.pct) { $tip += "  $(Get-Caption $key $cfg $bucket): $(Format-Pct $window.pct)%$(if ($window.reset) { ' - ' + (Get-ResetLong $window.reset) })" }
+        }
+        if ($bucket.rateLimitReachedType) { $tip += "  $($bucket.rateLimitReachedType -replace '_', ' ')" }
+      }
     }
     $tip += "Green under 70% $DOT amber from 70% $DOT red from 90%"
     if ($res.error) { $tip += $res.error }
@@ -1163,6 +1247,7 @@ function Get-WidgetSig($cfgs, $lim = @()) {
   foreach ($cfg in $cfgs) {
     $res = Get-Result $cfg.name
     $parts += "no5h:$(Test-NoFiveH $res)"
+    $parts += ($LimitKeys | ForEach-Object { Get-Caption $_ $cfg $res }) -join '/'
     $parts += ($LimitKeys | ForEach-Object { "$((Get-Win $res $_).pct)" }) -join '/'
     if ($reset) { $parts += ($LimitKeys | ForEach-Object { Get-Reset (Get-Win $res $_).reset }) -join '/' }
   }
@@ -1212,13 +1297,13 @@ function Build-WidgetGroups($panel, $cfgs, $lim) {
       }
     }
     if ($nameEl -and $nameMode -eq 'left') { [void]$g.Children.Add($nameEl) }
-    if ($cfg.style -eq 'combined' -and -not (Test-NoFiveH $res)) {
+    if (Test-CombinedWindows $cfg $res) {
       [void]$g.Children.Add((New-CombinedElement $cfg $res $shorts[$cfg.name]))
     } else {
       $keys = @(Get-ShownLimits $cfg $res)
       for ($k = 0; $k -lt $keys.Count; $k++) {
         $w = Get-Win $res $keys[$k]
-        [void]$g.Children.Add((New-RingElement $w.pct (Get-Caption $keys[$k]) ($k -lt $keys.Count - 1) $shorts[$cfg.name] $w.reset (Get-RingTip $cfg $keys[$k] $w)))
+        [void]$g.Children.Add((New-RingElement $w.pct (Get-Caption $keys[$k] $cfg $res) ($k -lt $keys.Count - 1) $shorts[$cfg.name] $w.reset (Get-RingTip $cfg $keys[$k] $w)))
       }
     }
     if ($usage) { [void]$g.Children.Add((Get-UsageTextXaml $cfg $res $(if ($inline) { Get-Label $cfg } else { '' }))) }
@@ -1674,7 +1759,7 @@ function New-FoldXaml([string]$name, [string]$icon, [string]$title, [string]$sub
 
 # The mini taskbar picture on a Look tile: bare initials rings, or one ring with two text lines.
 function New-MiniRingXaml([string]$name, [string]$letter) {
-  "<Grid Width=`"30`" Height=`"30`" Margin=`"0,0,8,0`"><Ellipse Stroke=`"$($Theme.ring)`" StrokeThickness=`"3.5`"/><Path x:Name=`"$name`" StrokeThickness=`"3.5`"/><TextBlock Text=`"$letter`" FontSize=`"10.5`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`" HorizontalAlignment=`"Center`" VerticalAlignment=`"Center`"/></Grid>"
+  "<Grid Width=`"30`" Height=`"30`" Margin=`"0,0,8,0`"><Ellipse Stroke=`"$($Theme.ring)`" StrokeThickness=`"3.5`"/><Path x:Name=`"$name`" StrokeThickness=`"3.5`"/>$(Get-CenteredRingTextXaml $letter 10.5)</Grid>"
 }
 function New-TileXaml([string]$key, [string]$title, [string]$sub, [string]$mini) {
 @"
@@ -1825,7 +1910,7 @@ $script:lastFind = [DateTime]::MinValue
 
 # One window row in the list: caption 40 | bar * (6 high) | pct 40 right | reset 78 right. The reset is left out when it
 # equals the row above (Fable usually resets with 7d); a 0% row is dimmer; within an hour the reset text turns bright.
-function Get-WindowRowXaml($key, $win, [string]$prevReset) {
+function Get-WindowRowXaml($key, $win, [string]$prevReset, $cfg = $null, $res = $null) {
   $pct = $win.pct
   $p = if ($null -ne $pct) { [Math]::Max(0, [Math]::Min(100, [double]$pct)) } else { 0 }
   $zero = ($null -ne $pct -and [Math]::Round([double]$pct) -eq 0)
@@ -1842,8 +1927,8 @@ function Get-WindowRowXaml($key, $win, [string]$prevReset) {
   $row = @"
 <Border Padding="4,3" Margin="0,1" CornerRadius="6" Background="Transparent"$tip>
   <Grid>
-    <Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/><ColumnDefinition Width="78"/></Grid.ColumnDefinitions>
-    <TextBlock Text="$(Esc (Get-Caption $key))" FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="$(if (Test-CodexAccount $cfg $res) { 72 } else { 40 })"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/><ColumnDefinition Width="78"/></Grid.ColumnDefinitions>
+    <TextBlock Text="$(Esc (Get-Caption $key $cfg $res))" FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
     <Grid Grid.Column="1" Height="6" VerticalAlignment="Center" Margin="0,0,10,0">
       <Border Background="$($Theme.bar)" CornerRadius="3"/>
       <Grid>
@@ -1861,6 +1946,9 @@ function Get-WindowRowXaml($key, $win, [string]$prevReset) {
 
 # The windows the list shows for an account: 5h when it has one (and 5h is on), 7d, and Fable per the list setting.
 function Get-ListKeys($cfg, $res) {
+  if (Test-CodexAccount $cfg $res) {
+    return @('5h', '7d' | Where-Object { ($_ -ne '5h' -or -not (Test-NoFiveH $res)) -and ($res.status -notin 'ok', 'limited' -or $null -ne (Get-RawWin $res $_).pct) })
+  }
   $keys = @()
   if (@(Get-ShownLimits $cfg $res) -contains '5h') { $keys += '5h' }
   $keys += '7d'
@@ -1871,10 +1959,10 @@ function Get-ListKeys($cfg, $res) {
 }
 
 # Problem states replace an account's rows with one line: a warning glyph and what to do.
-function Get-ProblemText($res) {
+function Get-ProblemText($res, $cfg = $null) {
   if (-not $res) { return $(if ($script:job) { "Loading$ELL" } else { '' }) }
   switch ($res.status) {
-    'expired' { 'Login expired: open Claude Code to renew it' }
+    'expired' { if (Test-CodexAccount $cfg $res) { 'Login expired: run codex login to renew it' } else { 'Login expired: open Claude Code to renew it' } }
     'invalid' { if ($res.error) { $res.error } else { 'Token invalid' } }
     'error'   { if ($res.error) { $res.error } else { 'Could not read usage' } }
     default   { '' }
@@ -1882,11 +1970,43 @@ function Get-ProblemText($res) {
 }
 
 # One account in the list: name + plan chip, then a window row per shown window (or one problem line).
+function Get-CodexQuotaRowsXaml($cfg, $res) {
+  if (-not (Test-CodexAccount $cfg $res)) { return '' }
+  $buckets = @($res.quotaBuckets | Where-Object { $_ -and $_.id -ne 'codex' })
+  if (-not $buckets.Count) {
+    if ($res.status -notin 'ok', 'limited') { return '' }
+    return "<TextBlock Text=`"No model-specific limits reported.`" FontSize=`"11`" Foreground=`"$($Theme.sub)`" Margin=`"4,5,0,2`"/>"
+  }
+  $markup = "<TextBlock Text=`"Additional limits`" FontSize=`"11`" Foreground=`"$($Theme.sub)`" Margin=`"4,8,0,2`"/>"
+  foreach ($bucket in $buckets) {
+    $details = "Quota: $($bucket.id)"
+    if ($bucket.normalModelSlug) { $details += "`nModel: $($bucket.normalModelSlug)" }
+    $markup += "<TextBlock Text=`"$(Esc $bucket.name)`" ToolTip=`"$(Esc $details)`" FontSize=`"12`" FontWeight=`"SemiBold`" Foreground=`"$($Theme.fg)`" TextWrapping=`"Wrap`" MaxWidth=`"320`" Margin=`"4,5,0,2`"/>"
+    $previous = ''
+    $hasWindow = $false
+    foreach ($key in '5h', '7d') {
+      $window = Get-RawWin $bucket $key
+      if ($null -eq $window.pct) { continue }
+      $hasWindow = $true
+      $entry = Get-WindowRowXaml $key $window $previous $cfg $bucket
+      $markup += $entry.xaml
+      $previous = $entry.reset
+    }
+    $reason = if ($bucket.rateLimitReachedType) { "$($bucket.rateLimitReachedType)" -replace '_', ' ' } elseif ($bucket.status -eq 'limited') { 'Limit reached' } elseif (-not $hasWindow) { 'Usage not reported' } else { '' }
+    if ($reason) {
+      $color = if ($bucket.status -eq 'limited') { $Colors.warn } else { $Theme.sub }
+      $markup += "<TextBlock Text=`"$(Esc $reason)`" FontSize=`"11`" Foreground=`"$color`" TextWrapping=`"Wrap`" MaxWidth=`"320`" Margin=`"4,0,0,3`"/>"
+    }
+  }
+  return $markup
+}
+
 function New-ListBlock($cfg) {
   $res = Get-Result $cfg.name
   $plan = Get-Plan $cfg $res
   $chip = if ($plan -and $script:config.listPlan -ne $false) { "<Border Background=`"$($Theme.chip)`" CornerRadius=`"4`" Padding=`"6,1,6,2`" Margin=`"8,0,0,0`" VerticalAlignment=`"Center`"><TextBlock Text=`"$(Esc $plan)`" FontSize=`"10.5`" Foreground=`"$($Theme.sub)`"/></Border>" } else { '' }
-  $problem = Get-ProblemText $res
+  if (Test-CodexAccount $cfg $res) { $chip = "<Border Background=`"$($Theme.chip)`" CornerRadius=`"4`" Padding=`"6,1,6,2`" Margin=`"8,0,0,0`"><TextBlock Text=`"$(Get-ProviderName $cfg $res)`" FontSize=`"10.5`" Foreground=`"$($Theme.sub)`"/></Border>" + $chip }
+  $problem = Get-ProblemText $res $cfg
   $rows = ''
   if ($problem) {
     $c = if ($res) { $Colors.warn } else { $Theme.sub }
@@ -1895,11 +2015,12 @@ function New-ListBlock($cfg) {
   } else {
     $prev = ''
     foreach ($k in (Get-ListKeys $cfg $res)) {
-      $r = Get-WindowRowXaml $k (Get-Win $res $k) $prev
+      $r = Get-WindowRowXaml $k (Get-Win $res $k) $prev $cfg $res
       $rows += $r.xaml
       if ($r.reset) { $prev = $r.reset }
     }
   }
+  $rows += Get-CodexQuotaRowsXaml $cfg $res
   $block = [Windows.Markup.XamlReader]::Parse(@"
 <StackPanel $ns Margin="0,0,0,8">
   <StackPanel Orientation="Horizontal" Margin="4,4,0,3">
@@ -1915,9 +2036,9 @@ function New-ListBlock($cfg) {
       $r.Add_MouseLeave({ param($s) $s.Background = 'Transparent' })
     }
   }
-  $via = switch ($res.method) { 'usage-api' { 'Read via the usage API (free)' } 'probe' { 'Read via a 1-token probe (setup-tokens cannot use the usage API)' } default { $null } }
+  $via = switch ($res.method) { 'usage-api' { 'Read via the usage API (free)' } 'probe' { 'Read via a 1-token probe (setup-tokens cannot use the usage API)' } 'codex-app-server' { 'Read via Codex app-server' } default { $null } }
   $planVia = if ($res.apiPlan) { 'Plan read from the API' } elseif ($res -and $cfg.plan) { "Plan set in settings (the API doesn't report it for this token)" }
-  $tipLines = @($via, $planVia) | Where-Object { $_ }
+  $tipLines = @($(if (Test-CodexAccount $cfg $res) { 'Codex' }), $via, $planVia) | Where-Object { $_ }
   if ($tipLines) { $block.ToolTip = $tipLines -join "`n" }
   return $block
 }
@@ -1930,7 +2051,7 @@ function New-LimitedRow($cfg) {
   [Windows.Markup.XamlReader]::Parse(@"
 <Grid $ns Margin="4,3,4,3">
   <Ellipse Width="13" Height="13" Stroke="$($Colors.bad)" StrokeThickness="2.4" HorizontalAlignment="Left" VerticalAlignment="Center"/>
-  <TextBlock Text="$(Esc (Get-Label $cfg))" FontSize="13" Foreground="$($Theme.fg)" Margin="24,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="200" HorizontalAlignment="Left"/>
+  <TextBlock Text="$(Esc ($(if (Test-CodexAccount $cfg $res) { 'Codex ' }) + (Get-Label $cfg)))" ToolTip="$(Esc (Get-AccountTip $cfg $res))" FontSize="13" Foreground="$($Theme.fg)" Margin="24,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="200" HorizontalAlignment="Left"/>
   <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="12" Foreground="$($Theme.sub)"><Run Text="Back "/><Run Text="$(Esc $back)" FontWeight="SemiBold" Foreground="$($Theme.fg)"/></TextBlock>
 </Grid>
 "@)
@@ -1949,20 +2070,23 @@ function New-AccountSettingsRow($cfg, $shownNames) {
     $b = Get-BackAt $res
     "<TextBlock Text=`"At limit$(if ($b) { ', back ' + (Get-Reset $b) })`" FontSize=`"12.5`" Foreground=`"$($Colors.bad)`" VerticalAlignment=`"Center`"/>"
   } else {
-    "<TextBlock Text=`"$(Esc (($keys | ForEach-Object { Get-Caption $_ }) -join " $DOT "))`" FontSize=`"12.5`" Foreground=`"$($Theme.sub)`" VerticalAlignment=`"Center`"/>"
+    "<TextBlock Text=`"$(Esc (($keys | ForEach-Object { Get-Caption $_ $cfg $res }) -join " $DOT "))`" FontSize=`"12.5`" Foreground=`"$($Theme.sub)`" VerticalAlignment=`"Center`"/>"
   }
   $chip = if ($plan) { "<Border Background=`"$($Theme.chip)`" CornerRadius=`"4`" Padding=`"7,2,7,3`" Margin=`"12,0,14,0`" VerticalAlignment=`"Center`"><TextBlock Text=`"$(Esc $plan)`" FontSize=`"11.5`" Foreground=`"$($Theme.sub)`"/></Border>" } else { '<Border Width="14"/>' }
   # Plan list: Auto (shows what the API reports) plus the fixed choices, plus a custom plan from the config so it isn't lost.
   $planOpts = @('') + $PlanChoices
   $curPlan = "$($cfg.plan)".Trim()
+  if (Test-CodexAccount $cfg $res) { $planOpts = @(''); $curPlan = '' }
   if ($curPlan -and $PlanChoices -notcontains $curPlan) { $planOpts += $curPlan }
   $lacks5 = Test-LacksFiveH $res
   $combined = $cfg.style -eq 'combined'
   $planApi = if ($res.apiPlan) { 'Plan read from the API.' } elseif ($res) { "The API doesn't report this plan: pick it here." } else { '' }
-  $via = switch ($res.method) { 'usage-api' { 'Read with the usage API (free)' } 'probe' { 'Read with a 1-token probe (setup token)' } default { '' } }
+  $via = switch ($res.method) { 'usage-api' { 'Read with the usage API (free)' } 'probe' { 'Read with a 1-token probe (setup token)' } 'codex-app-server' { 'Read with Codex app-server' } default { '' } }
+  if (Test-CodexAccount $cfg $res) { $via = "Codex $DOT $($cfg.source)$(if ($cfg.dir) { ' ' + $cfg.dir })$(if ($via) { " $DOT $via" })" }
   $limitChecks = ($LimitKeys | ForEach-Object {
     $dis = if ($_ -eq '5h' -and ($lacks5 -or $script:config.show5h -eq $false)) { ' IsEnabled="False"' } else { '' }
-    "<CheckBox x:Name=`"L_$_`" Content=`"$(Esc (Get-Caption $_))`" Margin=`"0,0,16,0`" VerticalAlignment=`"Center`"$dis/>"
+    if ($_ -eq 'fable' -and (Test-CodexAccount $cfg $res)) { $dis = ' Visibility="Collapsed" IsEnabled="False"' }
+    "<CheckBox x:Name=`"L_$_`" Content=`"$(Esc (Get-Caption $_ $cfg $res))`" Margin=`"0,0,16,0`" VerticalAlignment=`"Center`"$dis/>"
   }) -join ''
   $row = [Windows.Markup.XamlReader]::Parse(@"
 <StackPanel $ns xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Margin="0,0,0,0">
@@ -1973,7 +2097,7 @@ function New-AccountSettingsRow($cfg, $shownNames) {
       <TextBlock x:Name="Grip" DockPanel.Dock="Left" Text="&#xE76F;" FontFamily="$FontIcons" FontSize="14" Foreground="$($Theme.sub)" VerticalAlignment="Center" Margin="0,0,8,0" Cursor="SizeAll" ToolTip="Drag to reorder"/>
       <Grid DockPanel.Dock="Left" Width="18" Height="18" VerticalAlignment="Center" Margin="0,0,12,0"><Ellipse Stroke="$($Theme.ring)" StrokeThickness="2.6"/><Path x:Name="Ring" StrokeThickness="2.6"/></Grid>
       <TextBlock DockPanel.Dock="Left" Text="$(Esc (Get-Label $cfg))" FontSize="14" FontWeight="SemiBold" Foreground="$($Theme.fg)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="170"/>
-      <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">$chip$summary</StackPanel>
+      <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">$(if (Test-CodexAccount $cfg $res) { '<TextBlock Text="Codex" FontSize="11" Foreground="' + $Theme.sub + '" VerticalAlignment="Center" Margin="8,0,0,0"/>' })$chip$summary</StackPanel>
       <Border/>
     </DockPanel>
   </Border>
@@ -1999,9 +2123,9 @@ function New-AccountSettingsRow($cfg, $shownNames) {
           </StackPanel>
           <Button x:Name="Dn" Style="{DynamicResource IconBtn}" Content="&#xE74B;" ToolTip="Move down"/>
           <Button x:Name="Up" Style="{DynamicResource IconBtn}" Content="&#xE74A;" ToolTip="Move up"/>
-          <Button x:Name="Del" Style="{DynamicResource LinkBtn}" Content="Remove from widget" ToolTip="Removes it from the widget only; your Claude login is untouched"/>
+          <Button x:Name="Del" Style="{DynamicResource LinkBtn}" Content="Remove from widget" ToolTip="Removes it from the widget only; your login is untouched"/>
         </StackPanel>
-        <TextBlock Text="$(Esc $via)" FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+        <TextBlock Text="$(Esc $via)" ToolTip="$(Esc $via)" FontSize="12" Foreground="$($Theme.sub)" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
       </DockPanel>
     </Grid>
   </Border>
@@ -2045,12 +2169,17 @@ function New-AccountSettingsRow($cfg, $shownNames) {
   $pc = $row.FindName('Plan'); $autoText = if ($res.apiPlan) { "Auto: $($res.apiPlan)" } else { 'Auto' }
   for ($i = 0; $i -lt $planOpts.Count; $i++) { [void]$pc.Items.Add((New-Object Windows.Controls.ComboBoxItem -Property @{ Content = $(if ($planOpts[$i]) { $planOpts[$i] } else { $autoText }); Tag = $planOpts[$i] })) }
   $pc.SelectedIndex = [Math]::Max(0, [array]::IndexOf($planOpts, $curPlan)); $pc.Tag = $name
+  if (Test-CodexAccount $cfg $res) { $pc.IsEnabled = $false; $pc.ToolTip = 'Codex plan is read from the API.' }
   $pc.Add_SelectionChanged({ param($s) if ($s.IsLoaded -and $s.SelectedItem) { Set-AcctProp $s.Tag 'plan' $s.SelectedItem.Tag; Save-UiConfig; Update-Widget; Update-Popup -ListOnly } })
   $rc = $row.FindName('Rings')
-  foreach ($o in @(@('separate', 'Separate rings'), @('5h', '5h inside 7d'), @('7d', '7d inside 5h'))) { [void]$rc.Items.Add((New-Object Windows.Controls.ComboBoxItem -Property @{ Content = $o[1]; Tag = $o[0] })) }
+  $primaryCaption = if (Test-CodexAccount $cfg $res) { Get-Caption '5h' $cfg $res } else { '5h' }; $secondaryCaption = if (Test-CodexAccount $cfg $res) { Get-Caption '7d' $cfg $res } else { '7d' }
+  foreach ($o in @(@('separate', 'Separate rings'), @('5h', "$primaryCaption inside $secondaryCaption"), @('7d', "$secondaryCaption inside $primaryCaption"))) { [void]$rc.Items.Add((New-Object Windows.Controls.ComboBoxItem -Property @{ Content = $o[1]; Tag = $o[0] })) }
   $rc.SelectedIndex = if (-not $combined) { 0 } elseif ((Get-PieKey $cfg) -eq '5h') { 1 } else { 2 }
   $rc.Tag = $name
-  if ($lacks5) { $rc.SelectedIndex = 0; $rc.IsEnabled = $false; $row.FindName('No5').Text = 'No 5-hour window on this account' }
+  if ($lacks5) { $rc.SelectedIndex = 0; $rc.IsEnabled = $false; $row.FindName('No5').Text = if (Test-CodexAccount $cfg $res) { "No $primaryCaption window on this account" } else { 'No 5-hour window on this account' } }
+  if ((Test-CodexAccount $cfg $res) -and $res.status -in 'ok', 'limited' -and $null -eq $res.seven_d.pct) {
+    $rc.SelectedIndex = 0; $rc.IsEnabled = $false; $row.FindName('No5').Text = 'No secondary window on this account'
+  }
   $rc.Add_SelectionChanged({ param($s)
     if (-not $s.IsLoaded -or -not $s.SelectedItem) { return }
     $v = $s.SelectedItem.Tag
@@ -2132,7 +2261,7 @@ function Update-Popup([switch]$ListOnly) {
   foreach ($cfg in $avail) { [void]$PopupEls.List.Children.Add((New-ListBlock $cfg)) }
   if (-not $cfgs.Count) {
     $empty = New-Object Windows.Controls.TextBlock
-    $empty.Text = if ($script:job) { "Looking for accounts$ELL" } else { 'No accounts found. Log in with Claude Code (run claude), then right-click the rings > Scan for accounts.' }
+    $empty.Text = if ($script:job) { "Looking for accounts$ELL" } else { 'No accounts found. Log in with Claude Code (run claude) or Codex (run codex login), then right-click the rings > Scan for accounts.' }
     $empty.Foreground = $Theme.sub; $empty.Margin = '4,8'; $empty.TextWrapping = 'Wrap'
     [void]$PopupEls.List.Children.Add($empty)
   }
@@ -2390,7 +2519,7 @@ $script:nfEls = @{}
 
 function Test-AcctKnown($a) {
   @(Get-AcctCfgs | Where-Object {
-    $_.name -eq $a.name -or ($_.source -eq 'claude-code' -and $a.source -eq 'claude-code' -and "$($_.dir)" -eq "$($a.dir)")
+    Test-SameAccount $_ $a
   }).Count -gt 0
 }
 
@@ -2439,7 +2568,7 @@ function Start-Find([switch]$Auto) {
     param($lib)
     $ErrorActionPreference = 'Stop'
     . $lib
-    @(Find-ClaudeCodeLogins | ForEach-Object { [pscustomobject]$_ }) + @(Import-XndrClaudeAccounts | ForEach-Object { [pscustomobject]$_ })
+    @(Find-AllAccounts | ForEach-Object { [pscustomobject]$_ })
   }).AddArgument($LibPath)
   $script:findJob = @{ ps = $ps; handle = $ps.BeginInvoke(); started = Get-Date }
   $findTimer.Start()
@@ -2549,8 +2678,8 @@ function Show-FindTool($pan) {
   for ($i = 0; $i -lt $new.Count; $i++) {
     $a = $new[$i]
     $plan = "$($a.plan)".Trim()
-    $from = if ($a.source -eq 'xndr-claude') { 'xndr-claude account' } else { "Claude Code login$(if ($a.dir) { ' ' + $a.dir } else { '' })" }
-    $planPick = if (-not $plan) {
+    $from = if ($a.source -eq 'codex') { "Codex login $($a.dir)" } elseif ($a.source -eq 'xndr-claude') { 'xndr-claude account' } else { "Claude Code login$(if ($a.dir) { ' ' + $a.dir } else { '' })" }
+    $planPick = if (-not $plan -and $a.source -ne 'codex') {
       "<WrapPanel Margin=`"22,4,0,0`"><TextBlock Text=`"Plan`" Width=`"34`" FontSize=`"11`" Foreground=`"$($Theme.sub)`" VerticalAlignment=`"Center`"/>$(Get-PlanSegXaml "PF$i" '')</WrapPanel>"
     } else { '' }
     $row = [Windows.Markup.XamlReader]::Parse(@"
@@ -2564,7 +2693,7 @@ function Show-FindTool($pan) {
     $ck.Tag = $a
     $ck.IsChecked = [bool]$a.pick
     $ck.Add_Click({ param($s) $s.Tag.pick = [bool]$s.IsChecked })
-    if (-not $plan) {
+    if (-not $plan -and $a.source -ne 'codex') {
       $opts = @('') + $PlanChoices
       for ($k = 0; $k -lt $opts.Count; $k++) {
         $rb = $row.FindName("PF$($i)_$k")
@@ -2602,9 +2731,11 @@ function Update-NfSource {
   $e.note.Text = switch ($src) {
     'token'       { 'Paste the token from running "claude setup-token". It is saved to your Windows user environment after you approve it, and never shown again.' }
     'xndr-claude' { 'Name of an xndr-claude account.' }
+    'codex'       { 'Folder holding auth.json. Empty = CODEX_HOME or your default Codex login (~\.codex). Run codex login first.' }
     default       { 'Folder holding .credentials.json. Empty = your default Claude Code login (~\.claude).' }
   }
-  $e.browse.Visibility = if ($src -eq 'claude-code') { 'Visible' } else { 'Collapsed' }
+  $e.browse.Visibility = if ($src -in 'claude-code', 'codex') { 'Visible' } else { 'Collapsed' }
+  $e.plan.Visibility = if ($src -eq 'codex') { 'Collapsed' } else { 'Visible' }
   $e.chips.Visibility = if ($src -eq 'xndr-claude' -and $e.chips.Children.Count) { 'Visible' } else { 'Collapsed' }
   $e.input.Visibility = if ($tok) { 'Collapsed' } else { 'Visible' }
   $e.token.Visibility = if ($tok) { 'Visible' } else { 'Collapsed' }
@@ -2617,7 +2748,7 @@ function Show-AddTool($pan) {
   # xndr-claude is offered only on a PC that has it (or when the search found its accounts).
   $hasXc = Test-Command 'xndr-claude'
   $hasX = $hasXc -or @($script:found | Where-Object { $_.source -eq 'xndr-claude' }).Count -gt 0
-  $srcs = @(@('claude-code', 'Claude Code login'), @('token', 'Token'))
+  $srcs = @(@('claude-code', 'Claude Code login'), @('codex', 'Codex login'), @('token', 'Token'))
   if ($hasX) { $srcs += ,@('xndr-claude', 'xndr-claude') }
   if ($nf.src -notin ($srcs | ForEach-Object { $_[0] })) { $nf.src = 'claude-code' }
   $srcBoxes = ($srcs | ForEach-Object {
@@ -2637,7 +2768,7 @@ function Show-AddTool($pan) {
   </DockPanel>
   <WrapPanel Name="NfChips" Margin="56,6,0,0"/>
   <TextBlock Name="NfNote" Margin="56,4,0,0" FontSize="10.5" Foreground="$($Theme.sub)" TextWrapping="Wrap"/>
-  <WrapPanel Margin="0,8,0,0" ToolTip="Auto uses the plan of a Claude Code login, else whatever the API reports.">
+  <WrapPanel Name="NfPlan" Margin="0,8,0,0" ToolTip="Auto uses the plan of a Claude Code login, else whatever the API reports.">
     <TextBlock Text="Plan" Width="56" FontSize="11" Foreground="$($Theme.sub)" VerticalAlignment="Center"/>$(Get-PlanSegXaml 'NP' $nf.plan)
   </WrapPanel>
   <TextBlock Name="NfMsg" Margin="0,6,0,0" FontSize="11" Foreground="$($Colors.bad)" TextWrapping="Wrap" Visibility="Collapsed"/>
@@ -2653,6 +2784,7 @@ function Show-AddTool($pan) {
 </StackPanel>
 "@)
   $script:nfEls = @{
+    plan = $form.FindName('NfPlan')
     hint = $form.FindName('NfHint'); note = $form.FindName('NfNote'); browse = $form.FindName('NfBrowse')
     chips = $form.FindName('NfChips'); input = $form.FindName('NfInput'); token = $form.FindName('NfToken'); label = $form.FindName('NfLabel'); msg = $form.FindName('NfMsg')
     approve = $form.FindName('NfApprove'); approveText = $form.FindName('NfApproveText'); warn = $form.FindName('NfWarn')
@@ -2685,7 +2817,7 @@ function Show-AddTool($pan) {
   $script:nfEls.browse.Add_Click({
     Add-Type -AssemblyName System.Windows.Forms
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = 'Pick the folder that holds the Claude Code login (.credentials.json)'
+    $dlg.Description = if ($script:nf.src -eq 'codex') { 'Pick the folder that holds the Codex login (auth.json)' } else { 'Pick the folder that holds the Claude Code login (.credentials.json)' }
     $dlg.ShowNewFolderButton = $false
     $dlg.SelectedPath = $HOME
     try { if ($dlg.ShowDialog() -eq 'OK') { $script:nfEls.input.Text = $dlg.SelectedPath } }
@@ -2702,6 +2834,17 @@ function Invoke-AddAccount {
   $msg = $null; $detected = ''
   $o = [ordered]@{ name = $null; label = $null; plan = ''; source = $nf.src }
   switch ($nf.src) {
+    'codex' {
+      try { $dir = [IO.Path]::GetFullPath($(if ($in) { $in } else { Get-CodexHome })) }
+      catch { $msg = 'That is not a valid folder path.' }
+      if (-not $msg -and -not (Test-CodexProfile $dir)) { $msg = 'No Codex login (auth.json) in that folder. Run codex login first.' }
+      if (-not $msg) {
+        $o.dir = $dir
+        $o.name = Get-UniqueName ('codex-' + (Split-Path $dir -Leaf))
+        $o.label = if ($label) { $label } else { 'Codex' }
+        if (Test-AcctKnown ([pscustomobject]$o)) { $msg = 'That login is already in the widget.' }
+      }
+    }
     'claude-code' {
       $default = [IO.Path]::GetFullPath((Join-Path $HOME '.claude')).TrimEnd('\')
       $dir = ''
@@ -2753,7 +2896,7 @@ function Invoke-AddAccount {
     $script:nfEls.msg.Visibility = 'Visible'
     return
   }
-  $o.plan = if ($nf.plan) { $nf.plan } else { $detected }
+  $o.plan = if ($nf.src -eq 'codex') { '' } elseif ($nf.plan) { $nf.plan } else { $detected }
   Add-AcctCfg $o
   $script:nf = @{ label = ''; src = $nf.src; input = ''; plan = '' }
   $script:acctNote = "Added $($o.label)."

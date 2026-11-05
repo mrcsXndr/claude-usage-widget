@@ -7,6 +7,8 @@
 **Your Claude 5-hour, 7-day and Fable limits as small rings on the Windows 11 taskbar.**
 One account or several, updated in the background, in one click.
 
+The unreleased Windows 2.1 changes add Codex ChatGPT accounts alongside Claude, using the same widget and your existing settings. To test this checkout, run its `Install.cmd`; the published release installer still installs the latest published release. Codex support is Windows-only for now.
+
 > **On a Mac?** See [macos/](macos/README.md) for the menu bar version.
 
 **Install:** paste in PowerShell
@@ -36,7 +38,7 @@ irm https://github.com/mrcsXndr/claude-usage-widget/releases/latest/download/ins
 - **Two styles.** **Rings** gives each limit its own ring. **Combined** puts one limit as a pie in the middle and the other as the ring around it, with both percentages beside it. You choose which limit goes in the middle.
 - **Settings you can edit.** A Windows 11 style window with a live taskbar preview. Changes apply at once. Rename accounts, set initials and plan, choose each account's rings and windows, drag to reorder, rename the captions, set the refresh interval and time format.
 - **Stays out of the way.** Refreshes every 30 minutes by default (5 minutes at the most frequent), and never more than once a minute when you refresh by hand. Catches up after sleep. Hides during full-screen apps. Follows the light or dark theme.
-- **Nothing to install besides itself.** It's plain PowerShell and WPF, which ship with Windows, so there are no runtimes, services or admin rights involved.
+- **No extra runtime for Claude.** It's plain PowerShell and WPF, which ship with Windows. Codex support additionally requires the Codex CLI.
 
 ## Install
 
@@ -79,6 +81,10 @@ Running either one again updates you to the latest release and keeps your settin
 </div>
 
 ## Accounts
+
+For Codex, install the Codex CLI and sign in with ChatGPT (`codex login`). Use **Find new accounts** or **Add account** in Settings to select a Codex profile. The widget reads limits through the local Codex app-server, without sending an inference request or copying credentials. Window labels reflect the durations reported by Codex; API-key accounts do not expose ChatGPT subscription limits. Taskbar rings show the general Codex quota. Additional reported quotas, including model-specific limits, appear in the account list and on hover with their own percentages, window durations, resets, and reported limit reason. Labels come from Codex; the widget does not assume every model has a separate quota. Credit balances are not displayed. Claude's Fable limit applies only to Claude accounts.
+
+Compact taskbar reset times round up to the next hour with `~` when needed; hover for the precise reset time. The usage list retains minute precision. Before updating, the installer saves existing settings beside `config.json` as `config.pre-install-<timestamp>-<id>.json`.
 
 The widget finds accounts on its own:
 
@@ -139,7 +145,7 @@ Hover an account in the list to see which method it used.
 ## Privacy
 
 - Tokens are kept in memory only as long as one request takes. They're never written to disk, logged, shown, or passed on a command line.
-- The only network calls go to `api.anthropic.com`, plus `github.com` when you install or update.
+- Claude requests go to `api.anthropic.com`. Codex account requests are made by the Codex CLI to OpenAI services; GitHub is used for installation and updates.
 - Settings are stored in `%APPDATA%\claude-usage-widget`. Uninstalling removes them. Your Claude logins are never touched.
 
 ## Uninstall

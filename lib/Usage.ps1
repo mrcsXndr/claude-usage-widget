@@ -25,13 +25,15 @@ $FableModel = 'claude-fable-5-1'
 $ClaudeCodeSystem = "You are Claude Code, Anthropic's official CLI for Claude."
 $LimitKeys  = @('5h', '7d', 'fable')
 $DefaultCaptions = [ordered]@{ '5h' = '5h'; '7d' = '7d'; 'fable' = 'Fable' }
-$AppVersion = '2.0.0'
+$AppVersion = '2.1.0'
 # Self-update: the latest-release API, and the one zip "Update now" may download (the same asset install.ps1 uses).
 $ReleaseApiUrl = 'https://api.github.com/repos/mrcsXndr/claude-usage-widget/releases/latest'
 $UpdateZipUrl  = 'https://github.com/mrcsXndr/claude-usage-widget/releases/latest/download/ClaudeUsageWidget.zip'
 # Plans the settings picker offers; an empty plan means Auto (whatever the API reports).
 $PlanChoices = @('Pro', 'Max 5x', 'Max 20x', 'Ultra', 'Team', 'Enterprise')
 $UserAgent  = "claude-usage-widget/$AppVersion (+https://github.com/mrcsXndr/claude-usage-widget)"
+
+. (Join-Path $PSScriptRoot 'Codex.ps1')
 
 function Write-Log([string]$msg) {
   try {
@@ -194,12 +196,31 @@ function Import-XndrClaudeAccounts {
 }
 
 # Adds accounts found on this PC that the config doesn't have yet; returns how many were added.
+function Find-AllAccounts {
+  @(Find-ClaudeCodeLogins) + @(Import-XndrClaudeAccounts) + @(Find-CodexAccounts)
+}
+
+function Test-SameAccount($left, $right) {
+  if ($left.name -eq $right.name) { return $true }
+  if ($left.source -ne $right.source) { return $false }
+  if ($left.source -notin 'claude-code', 'codex') { return $false }
+  $leftDir = "$($left.dir)"; $rightDir = "$($right.dir)"
+  if ($left.source -eq 'codex') {
+    if (-not $leftDir) { $leftDir = Get-CodexHome }
+    if (-not $rightDir) { $rightDir = Get-CodexHome }
+  } else {
+    if (-not $leftDir) { $leftDir = Get-ClaudeConfigDir }
+    if (-not $rightDir) { $rightDir = Get-ClaudeConfigDir }
+  }
+  try {
+    return [IO.Path]::GetFullPath($leftDir).TrimEnd('\', '/') -eq [IO.Path]::GetFullPath($rightDir).TrimEnd('\', '/')
+  } catch { return $false }
+}
+
 function Add-DiscoveredAccounts($cfg) {
   $added = 0
-  foreach ($a in @(@(Find-ClaudeCodeLogins) + @(Import-XndrClaudeAccounts))) {
-    $known = @($cfg.accounts | Where-Object {
-      $_.name -eq $a.name -or ($_.source -eq 'claude-code' -and $a.source -eq 'claude-code' -and "$($_.dir)" -eq "$($a.dir)")
-    })
+  foreach ($a in @(Find-AllAccounts)) {
+    $known = @($cfg.accounts | Where-Object { Test-SameAccount $_ $a })
     if ($known.Count) { continue }
     $cfg.accounts = @($cfg.accounts) + @([pscustomobject]$a)
     $added++
@@ -505,7 +526,9 @@ function Get-ZipVersion([string]$zip) {
     $r = New-Object IO.StreamReader($e.Open())
     try { $text = $r.ReadToEnd() } finally { $r.Dispose() }
     if ($text -notmatch "\`$AppVersion\s*=\s*'(\d+\.\d+\.\d+)'") { throw 'the download has no version' }
-    return $Matches[1]
+    $zipVersion = $Matches[1]
+    if ([version]$zipVersion -ge [version]'2.1.0' -and $names -notcontains 'lib/Codex.ps1') { throw 'the download is not a complete widget release (no lib/Codex.ps1)' }
+    return $zipVersion
   } finally { $z.Dispose() }
 }
 
@@ -610,9 +633,15 @@ function Get-AllUsage($Config, [hashtable]$MethodCache = @{}) {
   $client = New-HttpClient
   try {
     foreach ($a in @($Config.accounts)) {
+      if ($a.source -eq 'codex') {
+        $codexRow = Read-CodexAccount $a
+        $codexRow | Add-Member -Force -NotePropertyName apiPlan -NotePropertyValue $codexRow.plan
+        $codexRow
+        continue
+      }
       $row = [ordered]@{
         name = $a.name; label = $(if ($a.label) { $a.label } else { $a.name }); plan = $a.plan; apiPlan = $null
-        status = 'error'; error = $null; method = $null
+        status = 'error'; error = $null; method = $null; provider = 'claude'
         five_h = (New-Window $null $null); seven_d = (New-Window $null $null); fable = (New-Window $null $null)
       }
       try {
